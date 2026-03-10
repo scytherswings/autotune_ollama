@@ -3,6 +3,8 @@
 import csv
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -465,6 +467,44 @@ def validate_config(config: dict) -> None:
         sys.exit(1)
 
 
+# (quant prefix → bytes per parameter, most-specific first)
+_QUANT_BYTES_PER_PARAM: list[tuple[str, float]] = [
+    ("fp16", 2.0),
+    ("f16",  2.0),
+    ("q8",   1.0),
+    ("q6",   0.75),
+    ("q5",   0.625),
+    ("q4",   0.5),
+    ("q3",   0.375),
+    ("q2",   0.25),
+]
+
+
+def _estimate_model_gb(model_name: str) -> float:
+    """Estimate download size in GB from a model name string.
+
+    Parses the parameter count (e.g. '7b', '13b') and quantization level
+    (e.g. 'q8_0', 'q4_K_M') embedded in the name, then applies 10% overhead
+    for metadata/tokenizer files.  Returns 10.0 GB when the name cannot be
+    parsed — a conservative fallback that errs on the side of caution.
+    """
+    name = model_name.lower()
+
+    param_match = re.search(r"(\d+(?:\.\d+)?)b", name)
+    if not param_match:
+        return 10.0  # unparseable → assume large
+
+    params_b = float(param_match.group(1))
+
+    bytes_per_param = 0.75  # ~q6 equivalent when quantization isn't detected
+    for quant, bpp in _QUANT_BYTES_PER_PARAM:
+        if quant in name:
+            bytes_per_param = bpp
+            break
+
+    return params_b * bytes_per_param * 1.1  # +10 % metadata overhead
+
+
 def preflight_check(config: dict) -> None:
     """Run all pre-flight checks before touching Docker or the API.
 
@@ -536,6 +576,70 @@ def preflight_check(config: dict) -> None:
             )
         else:
             print(f"  ok    {compose_file}")
+
+    # 6. Disk space — estimate total model download size and compare to free space
+    #    on the filesystem that backs the ollama-data Docker volume.
+    models = config.get("models", [])
+    if models:
+        model_sizes_gb = {m: _estimate_model_gb(m) for m in models}
+        total_gb = sum(model_sizes_gb.values())
+        largest_gb = max(model_sizes_gb.values())
+
+        # Ask Docker for the on-disk path of the volume so we check the right
+        # filesystem (Docker volumes may live on a separate mount).
+        mountpoint: str | None = None
+        try:
+            mp = subprocess.run(
+                ["docker", "volume", "inspect", "ollama-data",
+                 "--format", "{{.Mountpoint}}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            candidate = mp.stdout.strip()
+            if mp.returncode == 0 and candidate:
+                mountpoint = candidate
+        except Exception:
+            pass
+
+        if mountpoint:
+            try:
+                free_gb = shutil.disk_usage(mountpoint).free / (1024 ** 3)
+                if free_gb >= total_gb:
+                    print(
+                        f"  ok    Disk space: {free_gb:.0f} GB free "
+                        f"(~{total_gb:.0f} GB estimated for all {len(models)} models)"
+                    )
+                elif free_gb >= largest_gb:
+                    # Might have room for some but not all — warn, don't abort.
+                    # Models already present in the volume won't be re-downloaded.
+                    print(
+                        f"  WARN  Disk space: {free_gb:.0f} GB free, "
+                        f"~{total_gb:.0f} GB estimated to download all "
+                        f"{len(models)} models from scratch"
+                    )
+                    print(
+                        f"        Already-cached models won't be re-downloaded. "
+                        f"Downloads may fail if space runs out mid-run."
+                    )
+                else:
+                    # Less free than the single largest model — almost certainly
+                    # can't make progress; treat this as a hard failure.
+                    fail(
+                        f"Disk space critically low: {free_gb:.1f} GB free, "
+                        f"~{largest_gb:.1f} GB needed for the largest model alone",
+                        "free up space or shorten the model list in config.yaml",
+                    )
+            except Exception as e:
+                print(f"  WARN  Could not read disk usage at {mountpoint}: {e}")
+        else:
+            # Docker call to get mountpoint failed — still print the estimate so
+            # the user knows what to expect.
+            print(
+                f"  WARN  Could not determine ollama-data mountpoint for disk check"
+            )
+            print(
+                f"        Estimated model download: ~{total_gb:.0f} GB total "
+                f"across {len(models)} models"
+            )
 
     if not ok:
         print("\nPre-flight failed. Fix the issues above and re-run.")
