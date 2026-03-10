@@ -4,7 +4,7 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ollama-data:/root/.ollama
+      - ollama:/root/.ollama
     deploy:
       resources:
         reservations:
@@ -17,5 +17,6 @@ services:
       - OLLAMA_KEEP_ALIVE=-1
 
 volumes:
-  ollama-data:
+  ollama:
     external: true
+    name: ollama_ollama

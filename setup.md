@@ -50,13 +50,14 @@ git clone <repo-url> autotune-ollama
 cd autotune-ollama
 ```
 
-## 4. Create the Ollama data volume
+## 4. Ollama data volume
 
-Models are stored in a named Docker volume that persists across container restarts
-and config switches:
+Models are stored in the `ollama_ollama` Docker volume (shared with the Portainer
+Ollama stack). If you already have Ollama running via Portainer, this volume exists.
+Otherwise create it:
 
 ```bash
-docker volume create ollama-data
+docker volume create ollama_ollama
 ```
 
 ## 5. Set your Anthropic API key
@@ -122,7 +123,7 @@ python autotune.py
 
 autotune.py manages the full lifecycle:
 - Starts/restarts the Ollama Docker container for each infra config
-- Pulls models as needed (models persist in `ollama-data` volume)
+- Pulls models as needed (models persist in `ollama_ollama` volume)
 - Runs eval suite, judges output quality, logs results to `results.tsv`
 - Resume after interruption by running again — reads existing `results.tsv`
 
@@ -137,4 +138,4 @@ autotune.py manages the full lifecycle:
 | Ollama API not responding | Check `docker ps`; check `docker logs $(docker ps -qf name=ollama)` |
 | Model doesn't fit in VRAM | Auto-detected and skipped via `/api/ps`; remove from `config.yaml` if always failing |
 | `ANTHROPIC_API_KEY not set` | Export the key before running |
-| Models downloading slowly | First run pulls all models into `ollama-data` volume; subsequent runs reuse them |
+| Models downloading slowly | First run pulls all models into `ollama_ollama` volume; subsequent runs reuse them |

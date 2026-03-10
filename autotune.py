@@ -542,19 +542,19 @@ def preflight_check(config: dict) -> None:
     else:
         print("  ok    Docker daemon reachable")
 
-    # 3. ollama-data volume exists
+    # 3. ollama_ollama volume exists (shared with Portainer Ollama stack)
     result = subprocess.run(
-        ["docker", "volume", "inspect", "ollama-data"],
+        ["docker", "volume", "inspect", "ollama_ollama"],
         capture_output=True,
         timeout=10,
     )
     if result.returncode != 0:
         fail(
-            "Docker volume 'ollama-data' does not exist",
-            "docker volume create ollama-data",
+            "Docker volume 'ollama_ollama' does not exist",
+            "docker volume create ollama_ollama",
         )
     else:
-        print("  ok    ollama-data volume exists")
+        print("  ok    ollama_ollama volume exists")
 
     # 4. compose_dir exists
     compose_dir = Path(config["infra"]["compose_dir"])
