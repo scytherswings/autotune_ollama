@@ -136,7 +136,12 @@ def append_tsv(tsv_path: str, row: dict) -> None:
         writer.writerow([row.get(col, "") for col in TSV_COLUMNS])
 
 
-def switch_infra_config(config_name: str, compose_dir: str, project_name: str) -> bool:
+def switch_infra_config(
+    config_name: str,
+    compose_dir: str,
+    project_name: str,
+    ollama_volume: str,
+) -> bool:
     """Switch Ollama infra config by restarting the Docker container locally."""
     compose_file = Path(compose_dir) / f"docker-compose.{config_name}.yml"
     if not compose_file.exists():
@@ -157,11 +162,16 @@ def switch_infra_config(config_name: str, compose_dir: str, project_name: str) -
         print(f"  Stopping {len(stale)} stale container(s)...")
         subprocess.run(["docker", "stop"] + stale, capture_output=True)
 
+    # Pass the configured volume name so compose can substitute ${OLLAMA_VOLUME}
+    env = os.environ.copy()
+    env["OLLAMA_VOLUME"] = ollama_volume
+
     # Start new config
     result = subprocess.run(
         ["docker", "compose", "-p", project_name, "-f", str(compose_file),
          "up", "-d", "--force-recreate"],
         capture_output=True, text=True, timeout=120,
+        env=env,
     )
     if result.returncode != 0:
         print(f"ERROR: docker compose failed:\n{result.stderr}")
@@ -423,7 +433,7 @@ def validate_config(config: dict) -> None:
 
     # infra section
     infra = config.get("infra", {})
-    for key in ("ollama_host", "ollama_port", "compose_dir", "compose_project"):
+    for key in ("ollama_host", "ollama_port", "compose_dir", "compose_project", "ollama_volume"):
         if key not in infra:
             errors.append(f"  missing: infra.{key}")
 
@@ -478,6 +488,7 @@ def main():
     base_url = ollama_url(infra["ollama_host"], infra["ollama_port"])
     compose_dir = infra["compose_dir"]
     compose_project = infra["compose_project"]
+    ollama_volume = infra["ollama_volume"]
     models = config["models"]
     infra_configs = config["infra_configs"]
 
@@ -497,7 +508,7 @@ def main():
 
     for infra_config in infra_configs:
         # Switch infra config by restarting the Docker container
-        if not switch_infra_config(infra_config, compose_dir, compose_project):
+        if not switch_infra_config(infra_config, compose_dir, compose_project, ollama_volume):
             print(f"  SKIPPING infra config: {infra_config} (switch failed)")
             continue
 

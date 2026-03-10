@@ -104,19 +104,20 @@ def preflight_check(config: dict) -> None:
     else:
         print("  ok    Docker daemon reachable")
 
-    # 3. ollama_ollama volume exists (shared with Portainer Ollama stack)
+    # 3. Configured Ollama volume exists
+    volume_name = config.get("infra", {}).get("ollama_volume", "ollama_ollama")
     result = subprocess.run(
-        ["docker", "volume", "inspect", "ollama_ollama"],
+        ["docker", "volume", "inspect", volume_name],
         capture_output=True,
         timeout=10,
     )
     if result.returncode != 0:
         fail(
-            "Docker volume 'ollama_ollama' does not exist",
-            "docker volume create ollama_ollama",
+            f"Docker volume '{volume_name}' does not exist",
+            f"docker volume create {volume_name}",
         )
     else:
-        print("  ok    ollama_ollama volume exists")
+        print(f"  ok    Docker volume '{volume_name}' exists")
 
     # 4. compose_dir exists
     compose_dir = Path(config["infra"]["compose_dir"])
@@ -140,7 +141,7 @@ def preflight_check(config: dict) -> None:
             print(f"  ok    {compose_file}")
 
     # 6. Disk space — estimate total model download size and compare to free space
-    #    on the filesystem that backs the ollama_ollama Docker volume.
+    #    on the filesystem that backs the configured Docker volume.
     models = config.get("models", [])
     if models:
         model_sizes_gb = {m: _estimate_model_gb(m) for m in models}
@@ -152,7 +153,7 @@ def preflight_check(config: dict) -> None:
         mountpoint: str | None = None
         try:
             mp = subprocess.run(
-                ["docker", "volume", "inspect", "ollama_ollama",
+                ["docker", "volume", "inspect", volume_name,
                  "--format", "{{.Mountpoint}}"],
                 capture_output=True, text=True, timeout=10,
             )
@@ -195,7 +196,7 @@ def preflight_check(config: dict) -> None:
         else:
             # Docker call to get mountpoint failed — still print the estimate so
             # the user knows what to expect.
-            print("  WARN  Could not determine ollama_ollama mountpoint for disk check")
+            print(f"  WARN  Could not determine mountpoint for volume '{volume_name}'")
             print(
                 f"        Estimated model download: ~{total_gb:.0f} GB total "
                 f"across {len(models)} models"

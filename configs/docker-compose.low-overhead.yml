@@ -20,4 +20,4 @@ services:
 volumes:
   ollama:
     external: true
-    name: ollama_ollama
+    name: ${OLLAMA_VOLUME:-ollama_ollama}

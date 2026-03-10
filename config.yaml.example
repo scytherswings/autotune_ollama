@@ -3,6 +3,10 @@ infra:
   ollama_port: 11434
   compose_dir: configs
   compose_project: ollama-autotune
+  # Docker volume that holds Ollama model data.
+  # Match the name Docker assigned (check: docker volume ls).
+  # Portainer stacks typically name it <stack>_<service>, e.g. ollama_ollama.
+  ollama_volume: ollama_ollama
 
 models:
   - qwen2.5-coder:7b-instruct-q8_0
