@@ -2,12 +2,21 @@
 
 import json
 import os
+import shutil
 import sys
 
 import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()  # Load .env before anything touches os.environ
+
+
+def _write_atomic(path: str, data: dict) -> None:
+    """Write JSON to path atomically via a temp file (safe against mid-write crashes)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    shutil.move(tmp, path)
 
 
 def generate_references(
@@ -52,13 +61,12 @@ def generate_references(
             generated += 1
             print(f"    Done ({len(reference_text)} chars)")
 
+            # Write atomically after each success so a crash loses at most one entry
+            _write_atomic(prompts_file, data)
+
         except anthropic.APIError as e:
             print(f"    ERROR generating reference for {prompt_id}: {e}")
             prompt_entry["reference"] = None
-
-    # Write back
-    with open(prompts_file, "w") as f:
-        json.dump(data, f, indent=2)
 
     print(f"\nDone. Generated: {generated}, Skipped: {skipped}, Total: {total}")
 

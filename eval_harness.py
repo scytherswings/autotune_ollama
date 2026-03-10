@@ -24,7 +24,10 @@ def ollama_url(host: str, port: int) -> str:
 
 
 def pull_model(model: str, base_url: str) -> None:
-    """Pull a model from the Ollama library. Blocks until complete."""
+    """Pull a model from the Ollama library. Blocks until complete.
+
+    Raises RuntimeError if the model name is invalid or the pull fails.
+    """
     print(f"  Pulling model {model}...")
     resp = requests.post(
         f"{base_url}/api/pull",
@@ -38,6 +41,13 @@ def pull_model(model: str, base_url: str) -> None:
         if not line:
             continue
         data = json.loads(line)
+
+        # Ollama sends {"error": "..."} in the stream body for bad model names
+        if "error" in data:
+            raise RuntimeError(f"Ollama pull failed for '{model}': {data['error']}")
+        if data.get("status") == "error":
+            raise RuntimeError(f"Ollama pull error for '{model}': {data}")
+
         status = data.get("status", "")
         if "pulling" in status and "completed" in data:
             total = data.get("total", 0)
@@ -48,7 +58,22 @@ def pull_model(model: str, base_url: str) -> None:
         elif status:
             print(f"\r  {status}                    ", end="", flush=True)
 
-    print(f"\n  Model {model} ready.")
+    print(f"\n  Verifying {model} in local model list...")
+    try:
+        tags_resp = requests.get(f"{base_url}/api/tags", timeout=10)
+        tags_resp.raise_for_status()
+        local_models = [m["name"] for m in tags_resp.json().get("models", [])]
+        # Ollama may add a digest suffix; check for a prefix match on the model name
+        if not any(m == model or m.startswith(model + ":") or model.split(":")[0] in m
+                   for m in local_models):
+            raise RuntimeError(
+                f"Model '{model}' not found in /api/tags after pull. "
+                f"Available models: {local_models or '(none)'}"
+            )
+    except requests.RequestException as e:
+        print(f"  WARNING: Could not verify model in /api/tags: {e}")
+
+    print(f"  Model {model} ready.")
 
 
 def check_gpu_fit(model: str, base_url: str) -> bool:
@@ -83,19 +108,28 @@ def check_gpu_fit(model: str, base_url: str) -> bool:
         print(f"  WARNING: Could not check /api/ps: {e}")
         return False
 
-    for m in data.get("models", []):
-        if model in m.get("name", ""):
-            size_vram = m.get("size_vram", 0)
-            size = m.get("size", 0)
-            if size > 0 and size_vram < size:
-                gpu_pct = size_vram / size * 100
-                print(f"  Model {model}: {gpu_pct:.0f}% GPU — SKIPPING (CPU offload detected)")
-                return False
-            print(f"  Model {model}: 100% GPU")
-            return True
+    loaded = data.get("models", [])
 
-    print(f"  WARNING: Model {model} not found in /api/ps after loading")
-    return False
+    # Try exact match first; fall back to substring to handle digest-suffixed names
+    match = next((m for m in loaded if m.get("name", "") == model), None)
+    if match is None:
+        match = next((m for m in loaded if model in m.get("name", "")), None)
+
+    if match is None:
+        print(f"  WARNING: Model {model} not found in /api/ps after loading")
+        return False
+
+    size_vram = match.get("size_vram", 0)
+    size = match.get("size", 0)
+
+    if size > 0:
+        gpu_fraction = size_vram / size
+        if gpu_fraction < 0.95:  # >5% on CPU → skip
+            print(f"  Model {model}: {gpu_fraction * 100:.0f}% GPU — SKIPPING (CPU offload detected)")
+            return False
+
+    print(f"  Model {model}: fully in GPU VRAM")
+    return True
 
 
 def warmup(model: str, base_url: str) -> None:
@@ -190,13 +224,21 @@ def run_inference(
     else:
         ttft_ms = (time.perf_counter() - start_time) * 1000
 
+    response_text = "".join(response_chunks)
+
+    if not response_text and eval_count == 0:
+        raise RuntimeError(
+            f"Inference returned empty response for model '{model}'. "
+            "The model may have failed to load or returned an error."
+        )
+
     if eval_duration_ns > 0:
         tokens_per_sec = eval_count / (eval_duration_ns / 1e9)
     else:
         tokens_per_sec = 0.0
 
     return InferenceResult(
-        response_text="".join(response_chunks),
+        response_text=response_text,
         tokens_per_sec=tokens_per_sec,
         ttft_ms=ttft_ms,
         eval_count=eval_count,

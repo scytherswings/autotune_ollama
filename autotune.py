@@ -68,16 +68,24 @@ def load_config(path: str = "config.yaml") -> dict:
 
 def load_eval_prompts(path: str = "eval_prompts.json") -> list[dict]:
     """Load eval prompts, filtering out any without reference answers."""
+    if not Path(path).exists():
+        print(f"ERROR: {path} not found.")
+        print(f"  Make sure eval_prompts.json is present in the project directory.")
+        sys.exit(1)
+
     with open(path) as f:
         data = json.load(f)
 
     prompts = data.get("coding_prompts", []) + data.get("chat_prompts", [])
     valid = [p for p in prompts if p.get("reference")]
+    skipped = len(prompts) - len(valid)
 
     if not valid:
         print("ERROR: No eval prompts have reference answers. Run generate_references.py first.")
         sys.exit(1)
 
+    if skipped:
+        print(f"  WARNING: {skipped} prompt(s) skipped (no reference answer yet).")
     print(f"Loaded {len(valid)} eval prompts with references.")
     return valid
 
@@ -408,8 +416,137 @@ def coordinate_descent(
     return best_params
 
 
+def validate_config(config: dict) -> None:
+    """Validate config.yaml has all required keys. Exits with a clear message on failure."""
+    errors = []
+
+    # infra section
+    infra = config.get("infra", {})
+    for key in ("ollama_host", "ollama_port", "compose_dir", "compose_project"):
+        if key not in infra:
+            errors.append(f"  missing: infra.{key}")
+
+    # models
+    if not config.get("models"):
+        errors.append("  missing or empty: models")
+
+    # search_space and defaults must have the same keys
+    search_space = config.get("search_space", {})
+    defaults = config.get("defaults", {})
+    if not search_space:
+        errors.append("  missing or empty: search_space")
+    if not defaults:
+        errors.append("  missing or empty: defaults")
+    for key in search_space:
+        if key not in defaults:
+            errors.append(f"  search_space key '{key}' has no entry in defaults")
+    for key in defaults:
+        if key not in search_space:
+            errors.append(f"  defaults key '{key}' has no entry in search_space")
+
+    # scoring weights
+    scoring = config.get("scoring", {})
+    for key in ("quality_weight", "speed_weight", "ttft_weight"):
+        if key not in scoring:
+            errors.append(f"  missing: scoring.{key}")
+    if not errors:
+        total = sum(scoring.get(k, 0) for k in ("quality_weight", "speed_weight", "ttft_weight"))
+        if abs(total - 1.0) > 0.01:
+            print(f"  WARNING: scoring weights sum to {total:.3f}, expected 1.0")
+
+    # budget
+    if "max_api_calls" not in config.get("budget", {}):
+        errors.append("  missing: budget.max_api_calls")
+
+    if errors:
+        print("ERROR: config.yaml is invalid:")
+        for e in errors:
+            print(e)
+        sys.exit(1)
+
+
+def preflight_check(config: dict) -> None:
+    """Run all pre-flight checks before touching Docker or the API.
+
+    Exits with a clear, actionable message on any failure.
+    """
+    ok = True
+
+    def fail(msg: str, fix: str = "") -> None:
+        nonlocal ok
+        ok = False
+        print(f"  FAIL  {msg}")
+        if fix:
+            print(f"        fix: {fix}")
+
+    print("Running pre-flight checks...")
+
+    # 1. Anthropic API key
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        fail(
+            "ANTHROPIC_API_KEY is not set",
+            "add it to .env or export it in your shell",
+        )
+
+    # 2. Docker daemon accessible
+    result = subprocess.run(
+        ["docker", "info"],
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        fail(
+            "Docker daemon is not running or current user lacks access",
+            "start Docker, or run: sudo usermod -aG docker $USER && newgrp docker",
+        )
+    else:
+        print("  ok    Docker daemon reachable")
+
+    # 3. ollama-data volume exists
+    result = subprocess.run(
+        ["docker", "volume", "inspect", "ollama-data"],
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        fail(
+            "Docker volume 'ollama-data' does not exist",
+            "docker volume create ollama-data",
+        )
+    else:
+        print("  ok    ollama-data volume exists")
+
+    # 4. compose_dir exists
+    compose_dir = Path(config["infra"]["compose_dir"])
+    if not compose_dir.is_dir():
+        fail(
+            f"compose_dir '{compose_dir}' not found (run from the project root?)",
+            f"cd to the directory containing '{compose_dir}/' and try again",
+        )
+    else:
+        print(f"  ok    compose_dir '{compose_dir}' found")
+
+    # 5. All compose files exist
+    for infra_config in config.get("infra_configs", []):
+        compose_file = compose_dir / f"docker-compose.{infra_config}.yml"
+        if not compose_file.exists():
+            fail(
+                f"Compose file missing: {compose_file}",
+                f"ensure configs/docker-compose.{infra_config}.yml is present",
+            )
+        else:
+            print(f"  ok    {compose_file}")
+
+    if not ok:
+        print("\nPre-flight failed. Fix the issues above and re-run.")
+        sys.exit(1)
+
+    print("Pre-flight checks passed.\n")
+
+
 def main():
     config = load_config()
+    validate_config(config)
     eval_prompts = load_eval_prompts()
     tsv_path = "results.tsv"
     init_tsv(tsv_path)
@@ -420,6 +557,8 @@ def main():
     compose_project = infra["compose_project"]
     models = config["models"]
     infra_configs = config["infra_configs"]
+
+    preflight_check(config)
 
     completed = load_completed_experiments(tsv_path)
     api_call_count = [0]  # Mutable counter shared across calls
