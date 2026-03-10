@@ -1,0 +1,32 @@
+# Secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+*_rsa
+*_rsa.pub
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Results (potentially large / contains model outputs)
+results.tsv
+results_*.tsv
+
+# uv
+.python-version
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp

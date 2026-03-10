@@ -1,0 +1,49 @@
+vm:
+  host: "CHANGE_ME"  # IP or hostname of Ubuntu VM
+  user: autotune
+  ssh_key: "~/.ssh/autotune_rsa"
+  ollama_port: 11434
+
+models:
+  - qwen2.5-coder:7b-instruct-q8_0
+  - qwen2.5-coder:14b-instruct-q4_K_M
+  - deepseek-coder-v2-lite:16b-instruct-q4_K_M
+  - codellama:13b-instruct-q4_K_M
+  - llama3.1:8b-instruct-q8_0
+  - mistral:7b-instruct-q8_0
+  - phi3:14b-instruct-q4_K_M
+
+infra_configs:
+  - baseline
+  - flash-attn
+  - parallel-2
+  - parallel-4
+  - low-overhead
+
+search_space:
+  num_ctx: [2048, 4096, 8192, 16384, 32768]
+  temperature: [0.0, 0.1, 0.3, 0.7]
+  top_p: [0.9, 0.95, 1.0]
+  top_k: [20, 40, 80]
+  repeat_penalty: [1.0, 1.1, 1.2]
+  num_predict: [1024, 2048, 4096]
+
+defaults:
+  num_ctx: 4096
+  temperature: 0.1
+  top_p: 0.95
+  top_k: 40
+  repeat_penalty: 1.1
+  num_predict: 2048
+
+scoring:
+  quality_weight: 0.6
+  speed_weight: 0.25
+  ttft_weight: 0.15
+
+judge:
+  model: claude-sonnet-4-20250514
+  reference_model: claude-opus-4-20250514
+
+budget:
+  max_api_calls: 10000
