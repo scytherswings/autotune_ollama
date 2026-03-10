@@ -1,17 +1,17 @@
-vm:
-  host: "CHANGE_ME"  # IP or hostname of Ubuntu VM
-  user: autotune
-  ssh_key: "~/.ssh/autotune_rsa"
+infra:
+  ollama_host: localhost
   ollama_port: 11434
+  compose_dir: configs
+  compose_project: ollama-autotune
 
 models:
   - qwen2.5-coder:7b-instruct-q8_0
   - qwen2.5-coder:14b-instruct-q4_K_M
-  - deepseek-coder-v2-lite:16b-instruct-q4_K_M
+  - deepseek-coder-v2:16b-lite-instruct-q4_K_M
   - codellama:13b-instruct-q4_K_M
   - llama3.1:8b-instruct-q8_0
   - mistral:7b-instruct-q8_0
-  - phi3:14b-instruct-q4_K_M
+  - phi3:14b-medium-128k-instruct-q4_K_M
 
 infra_configs:
   - baseline

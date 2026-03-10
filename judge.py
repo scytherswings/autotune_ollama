@@ -6,6 +6,19 @@ import time
 
 import anthropic
 
+# Lazy singleton — instantiated once on first judge call
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable not set")
+        _client = anthropic.Anthropic(api_key=api_key)
+    return _client
+
 JUDGE_PROMPT_TEMPLATE = """You are evaluating the quality of an LLM response for use in agentic coding workflows.
 
 Reference answer (high quality):
@@ -46,11 +59,7 @@ def judge_output(
     Returns:
         Dict with keys: correctness, completeness, clarity, agent_utility, overall, brief_rationale
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    client = _get_client()
 
     judge_prompt = JUDGE_PROMPT_TEMPLATE.format(
         reference=reference,

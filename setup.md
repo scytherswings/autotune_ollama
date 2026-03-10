@@ -1,82 +1,72 @@
 # autotune-ollama Setup Guide
 
-## Prerequisites
+## Requirements
 
-- Mac with Python 3.10+ and `uv`
-- Ubuntu VM in Proxmox with NVIDIA RTX 5070 GPU passthrough
-- Docker + Docker Compose installed on the VM
-- Anthropic API key
+- Linux host with an NVIDIA GPU (tested on RTX 5070 / Blackwell)
+- Docker + Docker Compose v2
+- NVIDIA Container Toolkit (for GPU passthrough into Docker)
+- Python 3.10+ and [uv](https://github.com/astral-sh/uv)
+- Anthropic API key (for Claude judging calls)
+- Internet access (for model downloads and Claude API)
 
-## VM Setup
+> **Runs locally on the same machine as Docker.** No SSH, no remote access required.
 
-### 1. Create the autotune user
+---
 
-```bash
-# On the Ubuntu VM (as root/sudo user):
-sudo useradd -m -s /bin/bash autotune
-```
-
-### 2. SSH key auth (Mac to VM)
+## 1. Install Docker
 
 ```bash
-# On Mac:
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/autotune_rsa -N ""
-ssh-copy-id -i ~/.ssh/autotune_rsa autotune@<VM_IP>
-
-# Test:
-ssh -i ~/.ssh/autotune_rsa autotune@<VM_IP> whoami
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# Log out and back in for the group change to take effect
+docker run hello-world  # verify
 ```
 
-### 3. Deploy VM-side files
+## 2. Install NVIDIA Container Toolkit
 
 ```bash
-# On Mac, from this repo:
-scp -i ~/.ssh/autotune_rsa -r vm/* autotune@<VM_IP>:/home/autotune/ollama-configs/
-scp -i ~/.ssh/autotune_rsa vm/ollama-reconfig autotune@<VM_IP>:/home/autotune/bin/ollama-reconfig
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
-# On VM:
-ssh -i ~/.ssh/autotune_rsa autotune@<VM_IP>
-chmod +x ~/bin/ollama-reconfig
-mkdir -p ~/bin
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+sudo apt update && sudo apt install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# Verify GPU is visible inside Docker:
+docker run --rm --gpus all ubuntu nvidia-smi
 ```
 
-### 4. Sudoers rule (scoped docker compose access)
+> **Note for RTX 5070 (Blackwell):** Requires Ollama v0.17+ which bundles CUDA 12.8.
+> Pull the latest image before first run: `docker pull ollama/ollama`
+
+## 3. Clone the repo
 
 ```bash
-# On VM as root:
-sudo visudo -f /etc/sudoers.d/autotune-docker
-
-# Add this line:
-autotune ALL=(ALL) NOPASSWD: /usr/bin/docker compose -f /home/autotune/ollama-configs/*
+git clone <repo-url> autotune-ollama
+cd autotune-ollama
 ```
 
-### 5. Create Docker volume
+## 4. Create the Ollama data volume
+
+Models are stored in a named Docker volume that persists across container restarts
+and config switches:
 
 ```bash
-# On VM:
-sudo docker volume create ollama-data
+docker volume create ollama-data
 ```
 
-### 6. Test gatekeeper
-
-```bash
-# From Mac:
-ssh -i ~/.ssh/autotune_rsa autotune@<VM_IP> /home/autotune/bin/ollama-reconfig baseline
-```
-
-## Mac Setup
-
-### 1. Update config.yaml
-
-Edit `config.yaml` and set `vm.host` to your VM's IP address.
-
-### 2. Set API key
+## 5. Set your Anthropic API key
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
+# Add to ~/.bashrc or ~/.zshrc to persist across sessions
 ```
 
-### 3. Install Python dependencies
+## 6. Install Python dependencies
 
 ```bash
 uv venv
@@ -84,27 +74,59 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-### 4. Generate reference answers
+## 7. Edit config.yaml
+
+Set your GPU-specific preferences if needed. The defaults are tuned for a 12GB VRAM GPU.
+No VM IP or SSH key needed — everything runs locally.
+
+## 8. Test the Docker setup
+
+```bash
+# Start Ollama with the baseline config
+docker compose -p ollama-autotune -f configs/docker-compose.baseline.yml up -d
+
+# Verify API is up
+curl http://localhost:11434/api/tags
+
+# Verify GPU is being used
+docker exec $(docker ps -qf name=ollama) nvidia-smi
+
+# Tear down (autotune.py manages the container lifecycle from here)
+docker compose -p ollama-autotune -f configs/docker-compose.baseline.yml down
+```
+
+## 9. Generate reference answers
+
+Once you've finalized your eval prompts in `eval_prompts.json`, generate Opus reference
+answers (one-time, ~8 API calls):
 
 ```bash
 python generate_references.py
 ```
 
-This calls Claude Opus once per eval prompt to create gold-standard reference answers.
-Review `eval_prompts.json` to verify the references look good.
+Review `eval_prompts.json` to confirm the references look correct.
 
-### 5. Run autotune
+## 10. Run
 
 ```bash
 python autotune.py
 ```
 
-Results are logged to `results.tsv`. The process can be stopped and restarted — it will resume from where it left off.
+autotune.py manages the full lifecycle:
+- Starts/restarts the Ollama Docker container for each infra config
+- Pulls models as needed (models persist in `ollama-data` volume)
+- Runs eval suite, judges output quality, logs results to `results.tsv`
+- Resume after interruption by running again — reads existing `results.tsv`
+
+---
 
 ## Troubleshooting
 
-- **SSH connection refused**: Check VM firewall, ensure sshd is running
-- **Ollama API unreachable**: Verify port 11434 is exposed, check `docker ps` on VM
-- **Model doesn't fit in GPU**: Will be auto-detected and skipped via `/api/ps` check
-- **Rate limited by Anthropic**: Judge calls have exponential backoff built in
-- **Budget exhausted**: Increase `budget.max_api_calls` in config.yaml
+| Symptom | Fix |
+|---------|-----|
+| `docker: permission denied` | Run `sudo usermod -aG docker $USER` and re-login |
+| `nvidia-smi` not found in container | Install NVIDIA Container Toolkit (step 2) |
+| Ollama API not responding | Check `docker ps`; check `docker logs $(docker ps -qf name=ollama)` |
+| Model doesn't fit in VRAM | Auto-detected and skipped via `/api/ps`; remove from `config.yaml` if always failing |
+| `ANTHROPIC_API_KEY not set` | Export the key before running |
+| Models downloading slowly | First run pulls all models into `ollama-data` volume; subsequent runs reuse them |

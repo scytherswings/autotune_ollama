@@ -14,7 +14,6 @@ from pathlib import Path
 import yaml
 
 from eval_harness import (
-    InferenceResult,
     check_gpu_fit,
     ollama_url,
     pull_model,
@@ -121,34 +120,37 @@ def append_tsv(tsv_path: str, row: dict) -> None:
         writer.writerow([row.get(col, "") for col in TSV_COLUMNS])
 
 
-def switch_infra_config(config_name: str, vm_host: str, vm_user: str, ssh_key: str) -> bool:
-    """SSH to VM and run the gatekeeper script to switch infra config."""
+def switch_infra_config(config_name: str, compose_dir: str, project_name: str) -> bool:
+    """Switch Ollama infra config by restarting the Docker container locally."""
+    compose_file = Path(compose_dir) / f"docker-compose.{config_name}.yml"
+    if not compose_file.exists():
+        print(f"ERROR: Compose file not found: {compose_file}")
+        return False
+
     print(f"\n{'='*60}")
     print(f"Switching infra config: {config_name}")
     print(f"{'='*60}")
 
-    cmd = [
-        "ssh",
-        "-i", os.path.expanduser(ssh_key),
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ConnectTimeout=10",
-        f"{vm_user}@{vm_host}",
-        f"/home/{vm_user}/bin/ollama-reconfig {config_name}",
-    ]
+    # Stop any stale container on port 11434 (handles migration from other setups)
+    result = subprocess.run(
+        ["docker", "ps", "-q", "--filter", "publish=11434"],
+        capture_output=True, text=True,
+    )
+    stale = [c for c in result.stdout.strip().split() if c]
+    if stale:
+        print(f"  Stopping {len(stale)} stale container(s)...")
+        subprocess.run(["docker", "stop"] + stale, capture_output=True)
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"ERROR switching config: {result.stderr}")
-            return False
-        return True
-    except subprocess.TimeoutExpired:
-        print("ERROR: SSH command timed out")
+    # Start new config
+    result = subprocess.run(
+        ["docker", "compose", "-p", project_name, "-f", str(compose_file),
+         "up", "-d", "--force-recreate"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: docker compose failed:\n{result.stderr}")
         return False
-    except FileNotFoundError:
-        print("ERROR: ssh command not found")
-        return False
+    return True
 
 
 def evaluate_params(
@@ -405,16 +407,18 @@ def main():
     tsv_path = "results.tsv"
     init_tsv(tsv_path)
 
-    vm = config["vm"]
-    base_url = ollama_url(vm["host"], vm["ollama_port"])
+    infra = config["infra"]
+    base_url = ollama_url(infra["ollama_host"], infra["ollama_port"])
+    compose_dir = infra["compose_dir"]
+    compose_project = infra["compose_project"]
     models = config["models"]
     infra_configs = config["infra_configs"]
 
     completed = load_completed_experiments(tsv_path)
     api_call_count = [0]  # Mutable counter shared across calls
 
-    print(f"autotune-ollama starting")
-    print(f"  VM: {vm['host']}:{vm['ollama_port']}")
+    print("autotune-ollama starting")
+    print(f"  Ollama: {base_url}")
     print(f"  Models: {len(models)}")
     print(f"  Infra configs: {len(infra_configs)}")
     print(f"  Eval prompts: {len(eval_prompts)}")
@@ -422,18 +426,15 @@ def main():
     print(f"  API budget: {config['budget']['max_api_calls']}")
     print()
 
-    # Overall best tracking
-    overall_best = {"composite": 0, "model": "", "infra": "", "params": {}}
-
     for infra_config in infra_configs:
-        # Switch infra config via gatekeeper
-        if not switch_infra_config(infra_config, vm["host"], vm["user"], vm["ssh_key"]):
+        # Switch infra config by restarting the Docker container
+        if not switch_infra_config(infra_config, compose_dir, compose_project):
             print(f"  SKIPPING infra config: {infra_config} (switch failed)")
             continue
 
-        # Wait for API
+        # Wait for API to come up after container restart
         if not wait_for_api(base_url, timeout=90):
-            print(f"  SKIPPING infra config: {infra_config} (API not ready)")
+            print(f"  SKIPPING infra config: {infra_config} (API not ready after 90s)")
             continue
 
         for model in models:
