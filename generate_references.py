@@ -5,6 +5,9 @@ import os
 import sys
 
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env before anything touches os.environ
 
 
 def generate_references(

@@ -1,10 +1,14 @@
 # Secrets & credentials
-.env
-.env.*
+.env*
+!.env.example
 *.pem
 *.key
 *_rsa
 *_rsa.pub
+
+# Local config (copy from config.yaml.example)
+config.yaml
+!config.yaml.example
 
 # Python
 .venv/

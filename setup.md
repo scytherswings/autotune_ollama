@@ -62,9 +62,12 @@ docker volume create ollama-data
 ## 5. Set your Anthropic API key
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-# Add to ~/.bashrc or ~/.zshrc to persist across sessions
+cp .env.example .env
+# Edit .env and replace the placeholder with your real key:
+#   ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+`.env` is gitignored — your key will never be committed.
 
 ## 6. Install Python dependencies
 
@@ -74,9 +77,14 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-## 7. Edit config.yaml
+## 7. Create your config.yaml
 
-Set your GPU-specific preferences if needed. The defaults are tuned for a 12GB VRAM GPU.
+```bash
+cp config.yaml.example config.yaml
+# Edit config.yaml if needed — defaults are tuned for a 12GB VRAM GPU.
+```
+
+`config.yaml` is gitignored. `config.yaml.example` is the committed template.
 No VM IP or SSH key needed — everything runs locally.
 
 ## 8. Test the Docker setup

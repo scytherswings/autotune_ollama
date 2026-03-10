@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env before anything touches os.environ
 
 from eval_harness import (
     check_gpu_fit,
@@ -55,6 +58,10 @@ class EvalResult:
 
 
 def load_config(path: str = "config.yaml") -> dict:
+    if not Path(path).exists():
+        print(f"ERROR: {path} not found.")
+        print(f"  Copy config.yaml.example to config.yaml and fill in your settings.")
+        sys.exit(1)
     with open(path) as f:
         return yaml.safe_load(f)
 
