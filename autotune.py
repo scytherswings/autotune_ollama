@@ -195,12 +195,57 @@ def switch_infra_config(
     return True
 
 
+def compute_quality(scores: dict, judge_weights: dict) -> float:
+    """Compute quality score as weighted mean of judge sub-scores."""
+    return sum(scores[k] * judge_weights[k] for k in judge_weights)
+
+
+def append_details(
+    details_path: str,
+    infra_config: str,
+    model: str,
+    phase: str,
+    param_being_optimized: str,
+    params: dict,
+    prompt_id: str,
+    scores: dict,
+    quality: float,
+    tokens_per_sec: float,
+    ttft_ms: float,
+) -> None:
+    """Append one per-prompt detail record to details.jsonl."""
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "infra_config": infra_config,
+        "model": model,
+        "phase": phase,
+        "param_being_optimized": param_being_optimized,
+        **params,
+        "prompt_id": prompt_id,
+        "correctness": scores["correctness"],
+        "completeness": scores["completeness"],
+        "clarity": scores["clarity"],
+        "agent_utility": scores["agent_utility"],
+        "quality": round(quality, 4),
+        "brief_rationale": scores.get("brief_rationale", ""),
+        "tokens_per_sec": round(tokens_per_sec, 2),
+        "ttft_ms": round(ttft_ms, 1),
+    }
+    with open(details_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def evaluate_params(
     model: str,
+    infra_config: str,
+    phase: str,
+    param_being_optimized: str,
     params: dict,
     eval_prompts: list[dict],
     base_url: str,
     judge_model: str,
+    judge_weights: dict,
+    details_path: str,
 ) -> EvalResult:
     """Run all eval prompts with given params, judge quality, return aggregated scores."""
     quality_scores = []
@@ -227,7 +272,21 @@ def evaluate_params(
             reference=reference,
             model=judge_model,
         )
-        quality = scores["overall"]
+        quality = compute_quality(scores, judge_weights)
+
+        append_details(
+            details_path=details_path,
+            infra_config=infra_config,
+            model=model,
+            phase=phase,
+            param_being_optimized=param_being_optimized,
+            params=params,
+            prompt_id=prompt_id,
+            scores=scores,
+            quality=quality,
+            tokens_per_sec=result.tokens_per_sec,
+            ttft_ms=result.ttft_ms,
+        )
 
         quality_scores.append(quality)
         tps_values.append(result.tokens_per_sec)
@@ -241,7 +300,7 @@ def evaluate_params(
             "rationale": scores.get("brief_rationale", ""),
         })
 
-        print(f"    {prompt_id}: quality={quality:.1f} tps={result.tokens_per_sec:.1f} ttft={result.ttft_ms:.0f}ms")
+        print(f"    {prompt_id}: quality={quality:.2f} (c={scores['correctness']:.0f} co={scores['completeness']:.0f} cl={scores['clarity']:.0f} a={scores['agent_utility']:.0f}) tps={result.tokens_per_sec:.1f} ttft={result.ttft_ms:.0f}ms")
 
     if not quality_scores:
         return EvalResult(avg_quality=0, avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), per_prompt=per_prompt)
@@ -301,6 +360,7 @@ def coordinate_descent(
     eval_prompts: list[dict],
     base_url: str,
     tsv_path: str,
+    details_path: str,
     completed: set[str],
     api_call_count: list[int],
 ) -> dict:
@@ -312,6 +372,7 @@ def coordinate_descent(
     defaults = deepcopy(config["defaults"])
     search_space = config["search_space"]
     judge_model = config["judge"]["model"]
+    judge_weights = config["judge"]["quality_weights"]
     weights = config["scoring"]
     budget = config["budget"]["max_api_calls"]
     param_order = list(search_space.keys())
@@ -332,7 +393,13 @@ def coordinate_descent(
             print("  Budget exhausted!")
             return best_params
 
-        baseline_result = evaluate_params(model, defaults, eval_prompts, base_url, judge_model)
+        baseline_result = evaluate_params(
+            model=model, infra_config=infra_config, phase="baseline",
+            param_being_optimized="none", params=defaults,
+            eval_prompts=eval_prompts, base_url=base_url,
+            judge_model=judge_model, judge_weights=judge_weights,
+            details_path=details_path,
+        )
         api_call_count[0] += len(eval_prompts)
 
         all_tps.append(baseline_result.avg_tokens_per_sec)
@@ -392,7 +459,13 @@ def coordinate_descent(
                 return best_params
 
             print(f"    Trying {param_name}={value}")
-            result = evaluate_params(model, trial_params, eval_prompts, base_url, judge_model)
+            result = evaluate_params(
+                model=model, infra_config=infra_config, phase="sweep",
+                param_being_optimized=param_name, params=trial_params,
+                eval_prompts=eval_prompts, base_url=base_url,
+                judge_model=judge_model, judge_weights=judge_weights,
+                details_path=details_path,
+            )
             api_call_count[0] += len(eval_prompts)
 
             all_tps.append(result.avg_tokens_per_sec)
@@ -476,6 +549,16 @@ def validate_config(config: dict) -> None:
         if abs(total - 1.0) > 0.01:
             print(f"  WARNING: scoring weights sum to {total:.3f}, expected 1.0")
 
+    # judge quality_weights
+    quality_weights = config.get("judge", {}).get("quality_weights", {})
+    for key in ("correctness", "completeness", "clarity", "agent_utility"):
+        if key not in quality_weights:
+            errors.append(f"  missing: judge.quality_weights.{key}")
+    if quality_weights:
+        total = sum(quality_weights.get(k, 0) for k in ("correctness", "completeness", "clarity", "agent_utility"))
+        if abs(total - 1.0) > 0.01:
+            print(f"  WARNING: judge.quality_weights sum to {total:.3f}, expected 1.0")
+
     # budget
     if "max_api_calls" not in config.get("budget", {}):
         errors.append("  missing: budget.max_api_calls")
@@ -493,6 +576,7 @@ def main():
     validate_config(config)
     eval_prompts = load_eval_prompts()
     tsv_path = "results.tsv"
+    details_path = "details.jsonl"
     init_tsv(tsv_path)
 
     infra = config["infra"]
@@ -556,6 +640,7 @@ def main():
                 eval_prompts=eval_prompts,
                 base_url=base_url,
                 tsv_path=tsv_path,
+                details_path=details_path,
                 completed=completed,
                 api_call_count=api_call_count,
             )

@@ -25,11 +25,11 @@ infra_configs:
   - low-overhead
 
 search_space:
-  num_ctx: [2048, 4096, 8192, 16384, 32768]
+  num_ctx: [2048, 4096, 8192, 16384]
   temperature: [0.0, 0.1, 0.3, 0.7]
   top_p: [0.9, 0.95, 1.0]
   top_k: [20, 40, 80]
-  repeat_penalty: [1.0, 1.1, 1.2]
+  repeat_penalty: [1.1, 1.2]
   num_predict: [1024, 2048, 4096]
 
 defaults:
@@ -48,6 +48,12 @@ scoring:
 judge:
   model: claude-sonnet-4-20250514
   reference_model: claude-opus-4-20250514
+  # Weights used to compute quality score from sub-scores (must sum to 1.0)
+  quality_weights:
+    correctness: 0.40
+    completeness: 0.30
+    clarity: 0.20
+    agent_utility: 0.10
 
 budget:
   max_api_calls: 10000

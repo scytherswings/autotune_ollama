@@ -30,14 +30,32 @@ Candidate answer (from local model):
 Original prompt:
 <prompt>{prompt}</prompt>
 
-Score the candidate from 1-10 on:
-1. Correctness (does the code work / is the information accurate?)
-2. Completeness (does it address the full prompt?)
-3. Clarity (well-structured, good explanations?)
-4. Usefulness for an agent workflow (could another LLM consume this output and act on it?)
+Score the candidate 1-10 on each of these four criteria. Use the full range — reserve 10 for exceptional responses and 1 for completely wrong or useless ones.
+
+1. correctness: Does the code/answer actually solve the problem correctly?
+   - Code must run without errors and produce correct output for the stated problem
+   - Logic must be sound with no bugs or incorrect assumptions
+   - Factual claims must be accurate
+   - 1 = fundamentally broken or wrong; 10 = fully correct and handles the problem well
+
+2. completeness: Does the response address the entire prompt?
+   - All requirements and sub-tasks are covered
+   - Important edge cases are handled
+   - Nothing critical is missing that would require follow-up
+   - 1 = barely started or missing most requirements; 10 = fully addressed
+
+3. clarity: Is the response well-structured and understandable?
+   - Code is readable with appropriate naming, structure, and comments
+   - Explanations are clear and well-organized
+   - 1 = confusing or unreadable; 10 = exemplary clarity
+
+4. agent_utility: Can another LLM directly consume and act on this output without clarification?
+   - Code blocks are properly fenced and complete
+   - Output is unambiguous and self-contained
+   - 1 = requires major interpretation or cleanup; 10 = immediately usable as-is
 
 Return JSON only:
-{{"correctness": N, "completeness": N, "clarity": N, "agent_utility": N, "overall": N, "brief_rationale": "..."}}"""
+{{"correctness": N, "completeness": N, "clarity": N, "agent_utility": N, "brief_rationale": "one sentence explaining the correctness score"}}"""
 
 
 def judge_output(
@@ -57,7 +75,7 @@ def judge_output(
         max_retries: Max retries with exponential backoff
 
     Returns:
-        Dict with keys: correctness, completeness, clarity, agent_utility, overall, brief_rationale
+        Dict with keys: correctness, completeness, clarity, agent_utility, brief_rationale
     """
     client = _get_client()
 
@@ -87,7 +105,7 @@ def judge_output(
             scores = json.loads(text)
 
             # Validate expected keys
-            required = ["correctness", "completeness", "clarity", "agent_utility", "overall"]
+            required = ["correctness", "completeness", "clarity", "agent_utility"]
             for key in required:
                 if key not in scores:
                     raise ValueError(f"Missing key in judge response: {key}")
