@@ -104,7 +104,25 @@ def preflight_check(config: dict) -> None:
     else:
         print("  ok    Docker daemon reachable")
 
-    # 3. Configured Ollama volume exists
+    # 3. Docker Compose v2 plugin available
+    result = subprocess.run(
+        ["docker", "compose", "version"],
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        fail(
+            "Docker Compose v2 plugin not found ('docker compose version' failed)",
+            "install it: mkdir -p ~/.docker/cli-plugins && "
+            "curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 "
+            "-o ~/.docker/cli-plugins/docker-compose && "
+            "chmod +x ~/.docker/cli-plugins/docker-compose",
+        )
+    else:
+        version = result.stdout.decode().strip().split("\n")[0]
+        print(f"  ok    {version}")
+
+    # 5. Configured Ollama volume exists
     volume_name = config.get("infra", {}).get("ollama_volume", "ollama_ollama")
     result = subprocess.run(
         ["docker", "volume", "inspect", volume_name],
@@ -119,7 +137,7 @@ def preflight_check(config: dict) -> None:
     else:
         print(f"  ok    Docker volume '{volume_name}' exists")
 
-    # 4. compose_dir exists
+    # 6. compose_dir exists
     compose_dir = Path(config["infra"]["compose_dir"])
     if not compose_dir.is_dir():
         fail(
@@ -129,7 +147,7 @@ def preflight_check(config: dict) -> None:
     else:
         print(f"  ok    compose_dir '{compose_dir}' found")
 
-    # 5. All compose files exist
+    # 7. All compose files exist
     for infra_config in config.get("infra_configs", []):
         compose_file = compose_dir / f"docker-compose.{infra_config}.yml"
         if not compose_file.exists():
@@ -140,7 +158,7 @@ def preflight_check(config: dict) -> None:
         else:
             print(f"  ok    {compose_file}")
 
-    # 6. Disk space — estimate total model download size and compare to free space
+    # 8. Disk space — estimate total model download size and compare to free space
     #    on the filesystem that backs the configured Docker volume.
     models = config.get("models", [])
     if models:
