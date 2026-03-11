@@ -20,6 +20,8 @@ sys.stdout.reconfigure(line_buffering=True)  # Flush after each line when piped 
 
 from eval_harness import (
     check_gpu_fit,
+    get_ollama_allocation,
+    unload_model,
     ollama_url,
     pull_model,
     run_inference,
@@ -58,6 +60,7 @@ class EvalResult:
     avg_tokens_per_sec: float
     avg_ttft_ms: float
     per_prompt: list  # List of dicts with per-prompt details
+    failed_count: int = 0
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -107,11 +110,17 @@ def load_eval_prompts(
     return merged
 
 
-def load_completed_experiments(tsv_path: str) -> set[str]:
-    """Load completed experiment keys from existing results.tsv for resume capability."""
+def load_completed_experiments(tsv_path: str) -> tuple[set[str], dict[str, float]]:
+    """Load completed experiment keys and composite scores from results.tsv for resume.
+
+    Returns:
+        completed: set of experiment keys
+        scores: dict mapping experiment key -> composite_score
+    """
     completed = set()
+    scores = {}
     if not Path(tsv_path).exists():
-        return completed
+        return completed, scores
 
     with open(tsv_path, newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -129,8 +138,12 @@ def load_completed_experiments(tsv_path: str) -> set[str]:
                 row.get("num_predict", ""),
             )
             completed.add(key)
+            try:
+                scores[key] = float(row.get("composite_score", 0))
+            except (ValueError, TypeError):
+                scores[key] = 0.0
 
-    return completed
+    return completed, scores
 
 
 def _experiment_key(*args) -> str:
@@ -246,12 +259,14 @@ def evaluate_params(
     judge_model: str,
     judge_weights: dict,
     details_path: str,
+    min_tokens_per_sec: float = 0,
 ) -> EvalResult:
     """Run all eval prompts with given params, judge quality, return aggregated scores."""
     quality_scores = []
     tps_values = []
     ttft_values = []
     per_prompt = []
+    failed_count = 0
 
     for prompt_entry in eval_prompts:
         prompt_id = prompt_entry["id"]
@@ -260,9 +275,14 @@ def evaluate_params(
 
         try:
             result = run_inference(model, prompt_text, params, base_url)
+            if min_tokens_per_sec > 0 and result.tokens_per_sec < min_tokens_per_sec:
+                raise RuntimeError(
+                    f"TPS too low ({result.tokens_per_sec:.1f} < {min_tokens_per_sec} minimum) — likely CPU fallback"
+                )
         except Exception as e:
             print(f"    Inference failed for {prompt_id}: {e}")
             per_prompt.append({"id": prompt_id, "error": str(e)})
+            failed_count += 1
             continue
 
         # Judge quality — let fatal errors (billing, auth) propagate and abort the run
@@ -303,13 +323,14 @@ def evaluate_params(
         print(f"    {prompt_id}: quality={quality:.2f} (c={scores['correctness']:.0f} co={scores['completeness']:.0f} cl={scores['clarity']:.0f} a={scores['agent_utility']:.0f}) tps={result.tokens_per_sec:.1f} ttft={result.ttft_ms:.0f}ms")
 
     if not quality_scores:
-        return EvalResult(avg_quality=0, avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), per_prompt=per_prompt)
+        return EvalResult(avg_quality=0, avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), per_prompt=per_prompt, failed_count=failed_count)
 
     return EvalResult(
         avg_quality=sum(quality_scores) / len(quality_scores),
         avg_tokens_per_sec=sum(tps_values) / len(tps_values),
         avg_ttft_ms=sum(ttft_values) / len(ttft_values),
         per_prompt=per_prompt,
+        failed_count=failed_count,
     )
 
 
@@ -362,6 +383,7 @@ def coordinate_descent(
     tsv_path: str,
     details_path: str,
     completed: set[str],
+    completed_scores: dict[str, float],
     api_call_count: list[int],
 ) -> dict:
     """Run coordinate descent optimization for a single model+infra combo.
@@ -375,6 +397,9 @@ def coordinate_descent(
     judge_weights = config["judge"]["quality_weights"]
     weights = config["scoring"]
     budget = config["budget"]["max_api_calls"]
+    min_tps = config["budget"].get("min_tokens_per_sec", 0)
+    compose_project = config["infra"].get("compose_project", "ollama-autotune")
+    ollama_container = f"{compose_project}-ollama-1"
     param_order = list(search_space.keys())
 
     best_params = deepcopy(defaults)
@@ -398,7 +423,7 @@ def coordinate_descent(
             param_being_optimized="none", params=defaults,
             eval_prompts=eval_prompts, base_url=base_url,
             judge_model=judge_model, judge_weights=judge_weights,
-            details_path=details_path,
+            details_path=details_path, min_tokens_per_sec=min_tps,
         )
         api_call_count[0] += len(eval_prompts)
 
@@ -451,7 +476,11 @@ def coordinate_descent(
 
             key = _experiment_key(infra_config, model, phase, param_name, *[trial_params[p] for p in param_order])
             if key in completed:
-                print(f"    {param_name}={value}: already evaluated, skipping")
+                prior_composite = completed_scores.get(key, 0.0)
+                if prior_composite > best_composite_for_param:
+                    best_value_for_param = value
+                    best_composite_for_param = prior_composite
+                print(f"    {param_name}={value}: already evaluated, skipping (composite={prior_composite:.2f})")
                 continue
 
             if api_call_count[0] >= budget:
@@ -459,14 +488,30 @@ def coordinate_descent(
                 return best_params
 
             print(f"    Trying {param_name}={value}")
+            if param_name == "num_ctx":
+                unload_model(model, base_url)
+            load_time = datetime.now(timezone.utc).isoformat()
             result = evaluate_params(
                 model=model, infra_config=infra_config, phase="sweep",
                 param_being_optimized=param_name, params=trial_params,
                 eval_prompts=eval_prompts, base_url=base_url,
                 judge_model=judge_model, judge_weights=judge_weights,
-                details_path=details_path,
+                details_path=details_path, min_tokens_per_sec=min_tps,
             )
             api_call_count[0] += len(eval_prompts)
+
+            if param_name == "num_ctx":
+                alloc = get_ollama_allocation(ollama_container, load_time)
+                if alloc:
+                    gpu_layers = alloc.get("gpu_layers", "?")
+                    total_layers = alloc.get("total_layers", "?")
+                    kv_gpu = alloc.get("kv_gpu_mb", 0)
+                    kv_cpu = alloc.get("kv_cpu_mb", 0)
+                    print(f"    ollama: {gpu_layers}/{total_layers} layers on GPU  |  KV: {kv_gpu:.0f}MB GPU + {kv_cpu:.0f}MB CPU")
+
+            if param_name == "num_ctx" and result.failed_count > 0:
+                print(f"    num_ctx={value} had {result.failed_count} failure(s) — skipping larger values")
+                break
 
             all_tps.append(result.avg_tokens_per_sec)
             all_ttft.append(result.avg_ttft_ms)
@@ -589,7 +634,7 @@ def main():
 
     preflight_check(config)
 
-    completed = load_completed_experiments(tsv_path)
+    completed, completed_scores = load_completed_experiments(tsv_path)
     api_call_count = [0]  # Mutable counter shared across calls
 
     print("autotune-ollama starting")
@@ -642,6 +687,7 @@ def main():
                 tsv_path=tsv_path,
                 details_path=details_path,
                 completed=completed,
+                completed_scores=completed_scores,
                 api_call_count=api_call_count,
             )
 

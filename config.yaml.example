@@ -12,10 +12,12 @@ models:
   - qwen2.5-coder:7b-instruct-q8_0
   - qwen2.5-coder:14b-instruct-q4_K_M
   - deepseek-coder-v2:16b-lite-instruct-q4_K_M
+  - deepseek-coder-v2:16b-lite-instruct-q8_0
   - codellama:13b-instruct-q4_K_M
   - llama3.1:8b-instruct-q8_0
   - mistral:7b-instruct-q8_0
   - phi3:14b-medium-128k-instruct-q4_K_M
+  - qwen3-coder:30b
 
 infra_configs:
   - baseline
@@ -57,3 +59,4 @@ judge:
 
 budget:
   max_api_calls: 10000
+  min_tokens_per_sec: 20

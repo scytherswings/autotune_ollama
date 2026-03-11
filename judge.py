@@ -89,18 +89,20 @@ def judge_output(
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=512,
-                messages=[{"role": "user", "content": judge_prompt}],
+                max_tokens=1024,
+                messages=[
+                    {"role": "user", "content": judge_prompt},
+                    {"role": "assistant", "content": "{"},
+                ],
             )
 
-            # Extract text content
-            text = response.content[0].text.strip()
-
-            # Parse JSON — handle potential markdown code blocks
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1]
-                text = text.rsplit("```", 1)[0]
-            text = text.strip()
+            # Prepend the prefilled "{" and extract the first complete JSON object
+            text = "{" + response.content[0].text.strip()
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start == -1 or end == 0:
+                raise ValueError("No JSON object found in judge response")
+            text = text[start:end]
 
             scores = json.loads(text)
 

@@ -1,6 +1,8 @@
 """Ollama API client for running inference and measuring performance."""
 
 import json
+import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -87,6 +89,65 @@ def pull_model(model: str, base_url: str) -> None:
         print(f"  WARNING: Could not verify model in /api/tags: {e}")
 
     print(f"  Model {model} ready.")
+
+
+def get_ollama_allocation(container: str, since: str) -> dict:
+    """Parse Ollama container logs since a given ISO timestamp to extract
+    GPU/CPU layer offload and KV cache allocation for the most recent model load.
+
+    Returns a dict with keys: gpu_layers, total_layers, kv_gpu_mb, kv_cpu_mb, flash_attn.
+    Returns an empty dict if logs can't be read or parsed.
+    """
+    try:
+        out = subprocess.check_output(
+            ["docker", "logs", container, "--since", since],
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return {}
+
+    result = {}
+
+    # e.g. "load_tensors: offloaded 27/49 layers to GPU"
+    m = re.search(r"offloaded (\d+)/(\d+) layers to GPU", out)
+    if m:
+        result["gpu_layers"] = int(m.group(1))
+        result["total_layers"] = int(m.group(2))
+
+    # e.g. "llama_kv_cache:      CUDA0 KV buffer size =  3456.00 MiB"
+    #      "llama_kv_cache:        CPU KV buffer size =  2688.00 MiB"
+    kv_gpu = re.findall(r"CUDA\d+ KV buffer size =\s+([\d.]+) MiB", out)
+    kv_cpu = re.findall(r"CPU KV buffer size =\s+([\d.]+) MiB", out)
+    if kv_gpu:
+        result["kv_gpu_mb"] = float(kv_gpu[-1])
+    if kv_cpu:
+        result["kv_cpu_mb"] = float(kv_cpu[-1])
+
+    # e.g. "flash_attn    = enabled"
+    if "flash_attn    = enabled" in out:
+        result["flash_attn"] = True
+    elif "flash_attn    = disabled" in out:
+        result["flash_attn"] = False
+
+    return result
+
+
+def unload_model(model: str, base_url: str) -> None:
+    """Force Ollama to unload a model from memory so the next load can allocate cleanly."""
+    try:
+        requests.post(
+            f"{base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": ""}],
+                "stream": False,
+                "keep_alive": 0,
+            },
+            timeout=30,
+        )
+    except requests.RequestException:
+        pass  # Best-effort — if it fails the model may already be unloaded
 
 
 def check_gpu_fit(model: str, base_url: str) -> bool:
