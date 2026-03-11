@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import anthropic
 import yaml
 from dotenv import load_dotenv
 
@@ -83,12 +84,42 @@ def preflight_check(config: dict) -> None:
 
     print("Running pre-flight checks...")
 
-    # 1. Anthropic API key
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    # 1. Anthropic API key — check it's set and actually works (credits, auth)
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
         fail(
             "ANTHROPIC_API_KEY is not set",
             "add it to .env or export it in your shell",
         )
+    else:
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            client.messages.create(
+                model=config.get("judge", {}).get("model", "claude-sonnet-4-20250514"),
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            print("  ok    Anthropic API key valid and account has credits")
+        except anthropic.AuthenticationError:
+            fail(
+                "ANTHROPIC_API_KEY is invalid or revoked",
+                "check your key at console.anthropic.com and update .env",
+            )
+        except anthropic.PermissionDeniedError:
+            fail(
+                "Anthropic API key lacks permission to use the judge model",
+                "check your API key permissions at console.anthropic.com",
+            )
+        except anthropic.BadRequestError as e:
+            if "credit" in str(e).lower() or "balance" in str(e).lower():
+                fail(
+                    "Anthropic account has insufficient credits",
+                    "top up at console.anthropic.com/settings/billing",
+                )
+            else:
+                fail(f"Anthropic API returned an unexpected error: {e}")
+        except Exception as e:
+            fail(f"Could not reach Anthropic API: {e}")
 
     # 2. Docker daemon accessible
     result = subprocess.run(
