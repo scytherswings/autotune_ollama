@@ -1,6 +1,7 @@
 """Ollama API client for running inference and measuring performance."""
 
 import json
+import sys
 import time
 from dataclasses import dataclass
 
@@ -54,11 +55,23 @@ def pull_model(model: str, base_url: str) -> None:
             completed = data.get("completed", 0)
             if total > 0:
                 pct = completed / total * 100
-                print(f"\r  {status}: {pct:.0f}%", end="", flush=True)
+                if sys.stdout.isatty():
+                    print(f"\r  {status}: {pct:.0f}%", end="", flush=True)
+                else:
+                    # Log-friendly: print milestones at every 10%
+                    milestone = int(pct / 10) * 10
+                    if not hasattr(pull_model, "_last_milestone") or pull_model._last_milestone != milestone:
+                        pull_model._last_milestone = milestone
+                        if milestone % 10 == 0:
+                            print(f"  {status}: {milestone}%", flush=True)
         elif status:
-            print(f"\r  {status}                    ", end="", flush=True)
+            if sys.stdout.isatty():
+                print(f"\r  {status}                    ", end="", flush=True)
+            else:
+                print(f"  {status}", flush=True)
 
-    print(f"\n  Verifying {model} in local model list...")
+    pull_model._last_milestone = -1  # reset for next call
+    print(f"  Verifying {model} in local model list...")
     try:
         tags_resp = requests.get(f"{base_url}/api/tags", timeout=10)
         tags_resp.raise_for_status()
