@@ -220,19 +220,14 @@ def evaluate_params(
             per_prompt.append({"id": prompt_id, "error": str(e)})
             continue
 
-        # Judge quality
-        try:
-            scores = judge_output(
-                prompt=prompt_text,
-                candidate=result.response_text,
-                reference=reference,
-                model=judge_model,
-            )
-            quality = scores["overall"]
-        except Exception as e:
-            print(f"    Judging failed for {prompt_id}: {e}")
-            quality = 1.0
-            scores = {"overall": 1.0, "brief_rationale": f"Judge error: {e}"}
+        # Judge quality — let fatal errors (billing, auth) propagate and abort the run
+        scores = judge_output(
+            prompt=prompt_text,
+            candidate=result.response_text,
+            reference=reference,
+            model=judge_model,
+        )
+        quality = scores["overall"]
 
         quality_scores.append(quality)
         tps_values.append(result.tokens_per_sec)

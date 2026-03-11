@@ -105,18 +105,17 @@ def judge_output(
             if attempt < max_retries - 1:
                 time.sleep(2)
 
+        except anthropic.APIStatusError as e:
+            # Fatal errors (billing, auth, permissions) should not be retried
+            if e.status_code in (400, 401, 403):
+                raise RuntimeError(f"Fatal API error (not retriable): {e}") from e
+            wait = min(2 ** attempt * 5, 120)
+            print(f"  API error: {e}, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait)
+
         except anthropic.APIError as e:
             wait = min(2 ** attempt * 5, 120)
             print(f"  API error: {e}, waiting {wait}s (attempt {attempt + 1}/{max_retries})")
             time.sleep(wait)
 
-    # Return worst-case scores on total failure
-    print("  WARNING: Judge failed after all retries, returning minimum scores")
-    return {
-        "correctness": 1.0,
-        "completeness": 1.0,
-        "clarity": 1.0,
-        "agent_utility": 1.0,
-        "overall": 1.0,
-        "brief_rationale": "Judge call failed after retries",
-    }
+    raise RuntimeError(f"Judge failed after {max_retries} retries — results not recorded")
