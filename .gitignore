@@ -20,9 +20,16 @@ dist/
 build/
 .pytest_cache/
 
-# Results (potentially large / contains model outputs)
+# Results and logs (potentially large / contains model outputs)
 results.tsv
 results_*.tsv
+*.log
+
+# Generated reference answers (re-create with generate_references.py)
+references.json
+
+# Claude Code
+.claude/
 
 # uv
 .python-version

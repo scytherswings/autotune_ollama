@@ -67,28 +67,42 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def load_eval_prompts(path: str = "eval_prompts.json") -> list[dict]:
-    """Load eval prompts, filtering out any without reference answers."""
-    if not Path(path).exists():
-        print(f"ERROR: {path} not found.")
+def load_eval_prompts(
+    prompts_path: str = "eval_prompts.json",
+    references_path: str = "references.json",
+) -> list[dict]:
+    """Load eval prompts and merge in reference answers from references.json."""
+    if not Path(prompts_path).exists():
+        print(f"ERROR: {prompts_path} not found.")
         print(f"  Make sure eval_prompts.json is present in the project directory.")
         sys.exit(1)
 
-    with open(path) as f:
+    with open(prompts_path) as f:
         data = json.load(f)
 
-    prompts = data.get("coding_prompts", []) + data.get("chat_prompts", [])
-    valid = [p for p in prompts if p.get("reference")]
-    skipped = len(prompts) - len(valid)
+    refs: dict[str, str] = {}
+    if Path(references_path).exists():
+        with open(references_path) as f:
+            refs = json.load(f)
 
-    if not valid:
+    prompts = data.get("coding_prompts", []) + data.get("chat_prompts", [])
+
+    # Merge references in without mutating the source data
+    merged = []
+    for p in prompts:
+        if p["id"] in refs:
+            merged.append({**p, "reference": refs[p["id"]]})
+
+    skipped = len(prompts) - len(merged)
+
+    if not merged:
         print("ERROR: No eval prompts have reference answers. Run generate_references.py first.")
         sys.exit(1)
 
     if skipped:
         print(f"  WARNING: {skipped} prompt(s) skipped (no reference answer yet).")
-    print(f"Loaded {len(valid)} eval prompts with references.")
-    return valid
+    print(f"Loaded {len(merged)} eval prompts with references.")
+    return merged
 
 
 def load_completed_experiments(tsv_path: str) -> set[str]:
