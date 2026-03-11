@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Load .env before anything touches os.environ
 
+sys.stdout.reconfigure(line_buffering=True)  # Flush after each line when piped to tee/log
+
 from eval_harness import (
     check_gpu_fit,
     ollama_url,
