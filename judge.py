@@ -69,6 +69,9 @@ def _call_judge(judge_prompt: str, model: str, required_keys: list, max_retries:
 
 JUDGE_TOOL_CALL_TEMPLATE = """You are evaluating the quality of a tool call produced by a language model acting as a scheduling assistant.
 
+Context provided to the model:
+<system_prompt>{system_prompt}</system_prompt>
+
 User request:
 <user_message>{user_message}</user_message>
 
@@ -79,6 +82,7 @@ Model response:
 <model_response>{model_response}</model_response>
 
 Note: Objective checks (JSON validity, required fields) are handled separately. Focus on SEMANTIC quality.
+The model had access to the system prompt above — evaluate date/time values against that context.
 
 Score 1–10 on each criterion. Use the full range.
 
@@ -112,10 +116,11 @@ def judge_tool_call(
     Returns dict with keys: arg_correctness, tool_selection, brief_rationale
     """
     tools = prompt_entry.get("tools", [])
+    # Include full parameter schema (required + optional) so judge doesn't penalise valid optional args
     tool_schema_text = json.dumps(
         [{"name": t["function"]["name"],
           "description": t["function"]["description"],
-          "required": t["function"]["parameters"].get("required", [])}
+          "parameters": t["function"]["parameters"]}
          for t in tools],
         indent=2,
     )
@@ -136,6 +141,7 @@ def judge_tool_call(
     )
 
     judge_prompt = JUDGE_TOOL_CALL_TEMPLATE.format(
+        system_prompt=prompt_entry.get("system_prompt", ""),
         user_message=prompt_entry["user_message"],
         tool_schemas=tool_schema_text,
         reference_section=reference_section,
