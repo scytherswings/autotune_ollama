@@ -3,59 +3,66 @@ infra:
   ollama_port: 11434
   compose_dir: configs
   compose_project: ollama-autotune
-  # Docker volume that holds Ollama model data.
-  # Match the name Docker assigned (check: docker volume ls).
-  # Portainer stacks typically name it <stack>_<service>, e.g. ollama_ollama.
   ollama_volume: ollama_ollama
 
 models:
-  - qwen2.5-coder:7b-instruct-q8_0
+  - llama3.1:8b-instruct-q8_0
+  - gemma3:12b
+  - qwen3:14b
   - qwen2.5-coder:14b-instruct-q4_K_M
   - deepseek-coder-v2:16b-lite-instruct-q4_K_M
-  - deepseek-coder-v2:16b-lite-instruct-q8_0
-  - codellama:13b-instruct-q4_K_M
-  - llama3.1:8b-instruct-q8_0
-  - mistral:7b-instruct-q8_0
-  - phi3:14b-medium-128k-instruct-q4_K_M
-  - qwen3-coder:30b
 
 infra_configs:
   - baseline
   - flash-attn
-  - parallel-2
-  - parallel-4
-  - low-overhead
+
+eval:
+  types: [coding, tool_call]
+  prompts_file: eval_prompts.json
+  # How much each type contributes to the blended quality score that coordinate descent optimizes.
+  # Tune this to reflect your actual use-case priorities.
+  # Must sum to 1.0 across all active types.
+  type_weights:
+    coding: 0.40
+    tool_call: 0.60
 
 search_space:
-  num_ctx: [2048, 4096, 8192, 16384, 32768]
-  temperature: [0.0, 0.1, 0.3, 0.7]
+  num_ctx: [4096, 8192, 16384, 32768]
+  temperature: [0.0, 0.1, 0.3]
   top_p: [0.9, 0.95, 1.0]
   top_k: [20, 40, 80]
-  repeat_penalty: [1.1, 1.2]
-  num_predict: [1024, 2048, 4096]
+  repeat_penalty: [1.0, 1.1]
+  num_predict: [512, 1024, 2048]
 
 defaults:
-  num_ctx: 4096
+  num_ctx: 8192
   temperature: 0.1
   top_p: 0.95
   top_k: 40
-  repeat_penalty: 1.1
-  num_predict: 2048
+  repeat_penalty: 1.0
+  num_predict: 1024
 
 scoring:
-  quality_weight: 0.6
+  quality_weight: 0.65
   speed_weight: 0.25
-  ttft_weight: 0.15
+  ttft_weight: 0.10
 
 judge:
   model: claude-sonnet-4-20250514
-  reference_model: claude-opus-4-20250514
-  # Weights used to compute quality score from sub-scores (must sum to 1.0)
   quality_weights:
-    correctness: 0.40
-    completeness: 0.30
-    clarity: 0.20
-    agent_utility: 0.10
+    # --- Coding sub-scores (must sum to 1.0) ---
+    coding_correctness: 0.40
+    coding_completeness: 0.30
+    coding_clarity: 0.20
+    coding_agent_utility: 0.10
+
+    # --- Tool-call blend: objective checks vs. Claude judge (must sum to 1.0) ---
+    objective_weight: 0.50   # deterministic: JSON valid, correct tool chosen, required args present
+    judge_weight: 0.50       # semantic: Claude scores arg values and tool selection
+
+    # --- Tool-call semantic sub-scores (must sum to 1.0) ---
+    tool_arg_correctness: 0.60  # were argument values right given the user's request?
+    tool_selection: 0.40        # was the correct tool (or no tool) chosen?
 
 budget:
   max_api_calls: 10000

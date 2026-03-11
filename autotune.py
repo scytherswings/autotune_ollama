@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,15 +20,17 @@ sys.stdout.reconfigure(line_buffering=True)  # Flush after each line when piped 
 
 from eval_harness import (
     check_gpu_fit,
+    check_objective_criteria,
     get_ollama_allocation,
     unload_model,
     ollama_url,
     pull_model,
     run_inference,
+    run_tool_inference,
     wait_for_api,
     warmup,
 )
-from judge import judge_output
+from judge import judge_output, judge_tool_call
 from preflight import preflight_check
 
 
@@ -46,6 +48,8 @@ TSV_COLUMNS = [
     "num_predict",
     "tokens_per_sec",
     "ttft_ms",
+    "objective_score",
+    "judge_score",
     "quality_score",
     "composite_score",
     "is_best",
@@ -56,10 +60,13 @@ TSV_COLUMNS = [
 @dataclass
 class EvalResult:
     """Aggregated result from evaluating a full prompt suite."""
-    avg_quality: float
+    avg_quality: float           # weighted blend across active eval types
+    avg_objective_score: float   # avg for prompts with objective checks (tool_call)
+    avg_judge_score: float
     avg_tokens_per_sec: float
     avg_ttft_ms: float
-    per_prompt: list  # List of dicts with per-prompt details
+    per_prompt: list
+    quality_by_type: dict = field(default_factory=dict)  # {"coding": float, "tool_call": float}
     failed_count: int = 0
 
 
@@ -72,51 +79,69 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def load_eval_prompts(
-    prompts_path: str = "eval_prompts.json",
-    references_path: str = "references.json",
-) -> list[dict]:
-    """Load eval prompts and merge in reference answers from references.json."""
+def load_eval_prompts(config: dict) -> list[dict]:
+    """Load eval prompts from unified eval_prompts.json, filtered by config eval.types.
+
+    - Coding prompts get reference answers merged from references.json.
+    - Tool-call prompts get tool schemas inlined from tool_sets.
+    - Only categories listed in config.eval.types are included.
+    """
+    eval_cfg = config.get("eval", {})
+    active_types = set(eval_cfg.get("types", ["coding", "tool_call"]))
+    prompts_path = eval_cfg.get("prompts_file", "eval_prompts.json")
+
     if not Path(prompts_path).exists():
         print(f"ERROR: {prompts_path} not found.")
-        print(f"  Make sure eval_prompts.json is present in the project directory.")
         sys.exit(1)
 
     with open(prompts_path) as f:
         data = json.load(f)
 
+    tool_sets = data.get("tool_sets", {})
+
+    # Load references (coding answers + tool_call ideal args)
     refs: dict[str, str] = {}
-    if Path(references_path).exists():
-        with open(references_path) as f:
+    refs_path = "references.json"
+    if Path(refs_path).exists():
+        with open(refs_path) as f:
             refs = json.load(f)
 
-    prompts = data.get("coding_prompts", []) + data.get("chat_prompts", [])
+    prompts = []
 
-    # Merge references in without mutating the source data
-    merged = []
-    for p in prompts:
-        if p["id"] in refs:
-            merged.append({**p, "reference": refs[p["id"]]})
+    if "coding" in active_types:
+        skipped = 0
+        for p in data.get("coding_prompts", []):
+            if p["id"] not in refs:
+                skipped += 1
+                continue
+            prompts.append({**p, "reference": refs[p["id"]]})
+        if skipped:
+            print(f"  WARNING: {skipped} coding prompt(s) skipped (no reference — run generate_references.py).")
 
-    skipped = len(prompts) - len(merged)
+    if "tool_call" in active_types:
+        for p in data.get("tool_call_prompts", []):
+            entry = dict(p)
+            ts_key = entry.pop("tool_set", None)
+            if ts_key and ts_key in tool_sets:
+                entry["tools"] = tool_sets[ts_key]
+            entry["reference"] = refs.get(p["id"])  # None if not yet generated
+            prompts.append(entry)
 
-    if not merged:
-        print("ERROR: No eval prompts have reference answers. Run generate_references.py first.")
+    if not prompts:
+        print("ERROR: No prompts loaded. Check eval.types in config.yaml and run generate_references.py.")
         sys.exit(1)
 
-    if skipped:
-        print(f"  WARNING: {skipped} prompt(s) skipped (no reference answer yet).")
-    print(f"Loaded {len(merged)} eval prompts with references.")
-    return merged
+    counts = {}
+    for p in prompts:
+        t = p.get("category", "unknown")
+        counts[t] = counts.get(t, 0) + 1
+    summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+    print(f"Loaded {len(prompts)} eval prompts ({summary}).")
+    return prompts
 
 
 def load_completed_experiments(tsv_path: str) -> tuple[set[str], dict[str, float]]:
-    """Load completed experiment keys and composite scores from results.tsv for resume.
-
-    Returns:
-        completed: set of experiment keys
-        scores: dict mapping experiment key -> composite_score
-    """
+    """Load completed experiment keys and composite scores from results.tsv for resume."""
     completed = set()
     scores = {}
     if not Path(tsv_path).exists():
@@ -151,7 +176,6 @@ def _experiment_key(*args) -> str:
 
 
 def init_tsv(tsv_path: str) -> None:
-    """Create TSV file with headers if it doesn't exist."""
     if not Path(tsv_path).exists():
         with open(tsv_path, "w", newline="") as f:
             writer = csv.writer(f, delimiter="\t")
@@ -159,7 +183,6 @@ def init_tsv(tsv_path: str) -> None:
 
 
 def append_tsv(tsv_path: str, row: dict) -> None:
-    """Append a single result row to the TSV."""
     with open(tsv_path, "a", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow([row.get(col, "") for col in TSV_COLUMNS])
@@ -171,7 +194,7 @@ def switch_infra_config(
     project_name: str,
     ollama_volume: str,
 ) -> bool:
-    """Switch Ollama infra config by restarting the Docker container locally."""
+    """Switch Ollama infra config by restarting the Docker container."""
     compose_file = Path(compose_dir) / f"docker-compose.{config_name}.yml"
     if not compose_file.exists():
         print(f"ERROR: Compose file not found: {compose_file}")
@@ -181,7 +204,6 @@ def switch_infra_config(
     print(f"Switching infra config: {config_name}")
     print(f"{'='*60}")
 
-    # Stop any stale container on port 11434 (handles migration from other setups)
     result = subprocess.run(
         ["docker", "ps", "-q", "--filter", "publish=11434"],
         capture_output=True, text=True,
@@ -191,11 +213,9 @@ def switch_infra_config(
         print(f"  Stopping {len(stale)} stale container(s)...")
         subprocess.run(["docker", "stop"] + stale, capture_output=True)
 
-    # Pass the configured volume name so compose can substitute ${OLLAMA_VOLUME}
     env = os.environ.copy()
     env["OLLAMA_VOLUME"] = ollama_volume
 
-    # Start new config
     result = subprocess.run(
         ["docker", "compose", "-p", project_name, "-f", str(compose_file),
          "up", "-d", "--force-recreate"],
@@ -208,9 +228,41 @@ def switch_infra_config(
     return True
 
 
-def compute_quality(scores: dict, judge_weights: dict) -> float:
-    """Compute quality score as weighted mean of judge sub-scores."""
-    return sum(scores[k] * judge_weights[k] for k in judge_weights)
+def compute_quality(
+    judge_scores: dict,
+    prompt_type: str,
+    weights: dict,
+    objective_score: float | None = None,
+) -> tuple[float, float]:
+    """Compute quality score (0–10) from judge sub-scores, blended with objective for tool_call.
+
+    Returns (quality_0_to_10, judge_score_0_to_10).
+    """
+    if prompt_type == "coding":
+        sub_weights = {
+            "correctness":   weights.get("coding_correctness", 0.40),
+            "completeness":  weights.get("coding_completeness", 0.30),
+            "clarity":       weights.get("coding_clarity", 0.20),
+            "agent_utility": weights.get("coding_agent_utility", 0.10),
+        }
+        judge_score = sum(judge_scores.get(k, 5.0) * w for k, w in sub_weights.items())
+        quality = judge_score  # coding quality is pure semantic judge
+
+    elif prompt_type == "tool_call":
+        sub_weights = {
+            "arg_correctness": weights.get("tool_arg_correctness", 0.60),
+            "tool_selection":  weights.get("tool_selection", 0.40),
+        }
+        judge_score = sum(judge_scores.get(k, 5.0) * w for k, w in sub_weights.items())
+        obj_weight = weights.get("objective_weight", 0.50)
+        judge_weight = weights.get("judge_weight", 0.50)
+        quality = (objective_score or 1.0) * obj_weight * 10 + judge_score * judge_weight
+
+    else:
+        judge_score = 5.0
+        quality = 5.0
+
+    return round(quality, 4), round(judge_score, 4)
 
 
 def append_details(
@@ -221,10 +273,14 @@ def append_details(
     param_being_optimized: str,
     params: dict,
     prompt_id: str,
-    scores: dict,
+    prompt_type: str,
+    objective_score: float,
+    judge_scores: dict,
+    judge_score: float,
     quality: float,
     tokens_per_sec: float,
     ttft_ms: float,
+    used_native_tools: bool = False,
 ) -> None:
     """Append one per-prompt detail record to details.jsonl."""
     record = {
@@ -235,14 +291,15 @@ def append_details(
         "param_being_optimized": param_being_optimized,
         **params,
         "prompt_id": prompt_id,
-        "correctness": scores["correctness"],
-        "completeness": scores["completeness"],
-        "clarity": scores["clarity"],
-        "agent_utility": scores["agent_utility"],
+        "prompt_type": prompt_type,
+        "objective_score": round(objective_score, 4),
+        "judge_score": round(judge_score, 4),
+        **{k: v for k, v in judge_scores.items() if k != "brief_rationale"},
         "quality": round(quality, 4),
-        "brief_rationale": scores.get("brief_rationale", ""),
+        "brief_rationale": judge_scores.get("brief_rationale", ""),
         "tokens_per_sec": round(tokens_per_sec, 2),
         "ttft_ms": round(ttft_ms, 1),
+        "used_native_tools": used_native_tools,
     }
     with open(details_path, "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -258,41 +315,93 @@ def evaluate_params(
     base_url: str,
     judge_model: str,
     judge_weights: dict,
+    type_weights: dict,
     details_path: str,
     min_tokens_per_sec: float = 0,
 ) -> EvalResult:
-    """Run all eval prompts with given params, judge quality, return aggregated scores."""
-    quality_scores = []
-    tps_values = []
-    ttft_values = []
+    """Run all eval prompts, score with type-appropriate judge, return aggregated results."""
+    per_type_quality: dict[str, list[float]] = {}
+    per_type_obj: list[float] = []   # only tool_call prompts contribute
+    all_judge_scores: list[float] = []
+    tps_values: list[float] = []
+    ttft_values: list[float] = []
     per_prompt = []
     failed_count = 0
 
     for prompt_entry in eval_prompts:
         prompt_id = prompt_entry["id"]
-        prompt_text = prompt_entry["prompt"]
-        reference = prompt_entry["reference"]
+        prompt_type = prompt_entry.get("category", "coding")
 
+        # --- Inference ---
         try:
-            result = run_inference(model, prompt_text, params, base_url)
-            if min_tokens_per_sec > 0 and result.tokens_per_sec < min_tokens_per_sec:
-                raise RuntimeError(
-                    f"TPS too low ({result.tokens_per_sec:.1f} < {min_tokens_per_sec} minimum) — likely CPU fallback"
+            if prompt_type == "coding":
+                result = run_inference(
+                    model=model,
+                    prompt=prompt_entry["prompt"],
+                    options=params,
+                    base_url=base_url,
                 )
+                response_text = result.response_text
+                tool_calls = []
+                tps = result.tokens_per_sec
+                ttft = result.ttft_ms
+                used_native = False
+
+            elif prompt_type == "tool_call":
+                result = run_tool_inference(
+                    model=model,
+                    system_prompt=prompt_entry["system_prompt"],
+                    user_message=prompt_entry["user_message"],
+                    tools=prompt_entry.get("tools", []),
+                    options=params,
+                    base_url=base_url,
+                )
+                response_text = result.response_text
+                tool_calls = result.tool_calls
+                tps = result.tokens_per_sec
+                ttft = result.ttft_ms
+                used_native = result.used_native_tools
+
+            else:
+                print(f"    Skipping unknown prompt type '{prompt_type}' for {prompt_id}")
+                continue
+
+            if min_tokens_per_sec > 0 and tps < min_tokens_per_sec:
+                raise RuntimeError(
+                    f"TPS too low ({tps:.1f} < {min_tokens_per_sec} minimum) — likely CPU fallback"
+                )
+
         except Exception as e:
             print(f"    Inference failed for {prompt_id}: {e}")
-            per_prompt.append({"id": prompt_id, "error": str(e)})
+            per_prompt.append({"id": prompt_id, "type": prompt_type, "error": str(e)})
             failed_count += 1
             continue
 
-        # Judge quality — let fatal errors (billing, auth) propagate and abort the run
-        scores = judge_output(
-            prompt=prompt_text,
-            candidate=result.response_text,
-            reference=reference,
-            model=judge_model,
-        )
-        quality = compute_quality(scores, judge_weights)
+        # --- Objective checks ---
+        if prompt_type == "tool_call":
+            objective = check_objective_criteria(prompt_entry, tool_calls, response_text)
+            objective_score = objective.objective_score
+            per_type_obj.append(objective_score)
+        else:
+            objective_score = 1.0  # N/A for coding
+
+        # --- Claude judge (fatal errors propagate to abort the run) ---
+        reference = prompt_entry.get("reference")
+        if prompt_type == "coding":
+            scores = judge_output(
+                prompt=prompt_entry["prompt"],
+                candidate=response_text,
+                reference=reference or "",
+                model=judge_model,
+            )
+        else:  # tool_call
+            scores = judge_tool_call(
+                prompt_entry, tool_calls, response_text,
+                reference=reference,
+                model=judge_model,
+            )
+
+        quality, judge_score = compute_quality(scores, prompt_type, judge_weights, objective_score)
 
         append_details(
             details_path=details_path,
@@ -302,34 +411,79 @@ def evaluate_params(
             param_being_optimized=param_being_optimized,
             params=params,
             prompt_id=prompt_id,
-            scores=scores,
+            prompt_type=prompt_type,
+            objective_score=objective_score,
+            judge_scores=scores,
+            judge_score=judge_score,
             quality=quality,
-            tokens_per_sec=result.tokens_per_sec,
-            ttft_ms=result.ttft_ms,
+            tokens_per_sec=tps,
+            ttft_ms=ttft,
+            used_native_tools=used_native,
         )
 
-        quality_scores.append(quality)
-        tps_values.append(result.tokens_per_sec)
-        ttft_values.append(result.ttft_ms)
+        per_type_quality.setdefault(prompt_type, []).append(quality)
+        all_judge_scores.append(judge_score)
+        tps_values.append(tps)
+        ttft_values.append(ttft)
 
         per_prompt.append({
             "id": prompt_id,
+            "type": prompt_type,
             "quality": quality,
-            "tokens_per_sec": result.tokens_per_sec,
-            "ttft_ms": result.ttft_ms,
+            "objective": objective_score,
+            "judge": judge_score,
+            "tokens_per_sec": tps,
+            "ttft_ms": ttft,
             "rationale": scores.get("brief_rationale", ""),
         })
 
-        print(f"    {prompt_id}: quality={quality:.2f} (c={scores['correctness']:.0f} co={scores['completeness']:.0f} cl={scores['clarity']:.0f} a={scores['agent_utility']:.0f}) tps={result.tokens_per_sec:.1f} ttft={result.ttft_ms:.0f}ms")
+        if prompt_type == "coding":
+            print(f"    {prompt_id}: quality={quality:.2f} "
+                  f"(c={scores.get('correctness',0):.0f} co={scores.get('completeness',0):.0f} "
+                  f"cl={scores.get('clarity',0):.0f} a={scores.get('agent_utility',0):.0f}) "
+                  f"tps={tps:.1f} ttft={ttft:.0f}ms")
+        else:
+            called = tool_calls[0]["function"]["name"] if tool_calls else "none"
+            native = "native" if used_native else "text"
+            print(f"    {prompt_id}: quality={quality:.2f} obj={objective_score:.2f} "
+                  f"judge={judge_score:.1f} tool={called} ({native}) tps={tps:.1f} ttft={ttft:.0f}ms")
 
-    if not quality_scores:
-        return EvalResult(avg_quality=0, avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), per_prompt=per_prompt, failed_count=failed_count)
+    if not per_type_quality:
+        return EvalResult(
+            avg_quality=0, avg_objective_score=0, avg_judge_score=0,
+            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"),
+            per_prompt=per_prompt, quality_by_type={}, failed_count=failed_count,
+        )
+
+    # Per-type averages
+    quality_by_type = {t: sum(v) / len(v) for t, v in per_type_quality.items()}
+
+    # Weighted blend across types
+    if type_weights and len(quality_by_type) > 1:
+        total_w = sum(type_weights.get(t, 0) for t in quality_by_type)
+        if total_w > 0:
+            blended = sum(quality_by_type[t] * type_weights.get(t, 0) for t in quality_by_type) / total_w
+        else:
+            blended = sum(quality_by_type.values()) / len(quality_by_type)
+    else:
+        blended = sum(quality_by_type.values()) / len(quality_by_type)
+
+    # Print per-type summary when running mixed suite
+    if len(quality_by_type) > 1:
+        type_summary = "  ".join(f"{t}={v:.2f}" for t, v in sorted(quality_by_type.items()))
+        print(f"    → per-type: {type_summary}  blended={blended:.2f}")
+
+    avg_obj = sum(per_type_obj) / len(per_type_obj) if per_type_obj else 1.0
+    avg_judge = sum(all_judge_scores) / len(all_judge_scores)
 
     return EvalResult(
-        avg_quality=sum(quality_scores) / len(quality_scores),
+        avg_quality=round(blended, 4),
+        avg_objective_score=round(avg_obj, 4),
+        avg_judge_score=round(avg_judge, 4),
         avg_tokens_per_sec=sum(tps_values) / len(tps_values),
         avg_ttft_ms=sum(ttft_values) / len(ttft_values),
         per_prompt=per_prompt,
+        quality_by_type=quality_by_type,
         failed_count=failed_count,
     )
 
@@ -343,25 +497,14 @@ def compute_composite(
     weights: dict,
 ) -> float:
     """Compute composite score with min-max normalization for speed metrics."""
-    # Normalize tokens/sec (higher is better)
     tps_min, tps_max = tps_range
-    if tps_max > tps_min:
-        tps_norm = (tps - tps_min) / (tps_max - tps_min)
-    else:
-        tps_norm = 0.5
+    tps_norm = (tps - tps_min) / (tps_max - tps_min) if tps_max > tps_min else 0.5
 
-    # Normalize TTFT (lower is better, so invert)
     ttft_min, ttft_max = ttft_range
-    if ttft_max > ttft_min:
-        ttft_norm = 1.0 - (ttft - ttft_min) / (ttft_max - ttft_min)
-    else:
-        ttft_norm = 0.5
+    ttft_norm = 1.0 - (ttft - ttft_min) / (ttft_max - ttft_min) if ttft_max > ttft_min else 0.5
 
-    # Clamp to [0, 1]
     tps_norm = max(0, min(1, tps_norm))
     ttft_norm = max(0, min(1, ttft_norm))
-
-    # Quality is on 1-10 scale, normalize to 0-1
     quality_norm = (quality - 1) / 9
 
     composite = (
@@ -369,8 +512,6 @@ def compute_composite(
         + tps_norm * weights["speed_weight"]
         + ttft_norm * weights["ttft_weight"]
     )
-
-    # Scale back to 0-10 for readability
     return composite * 10
 
 
@@ -386,15 +527,12 @@ def coordinate_descent(
     completed_scores: dict[str, float],
     api_call_count: list[int],
 ) -> dict:
-    """Run coordinate descent optimization for a single model+infra combo.
-
-    Optimizes one parameter at a time, keeping others at their current best.
-    Returns the best parameter set found.
-    """
+    """Run coordinate descent optimization for a single model+infra combo."""
     defaults = deepcopy(config["defaults"])
     search_space = config["search_space"]
     judge_model = config["judge"]["model"]
     judge_weights = config["judge"]["quality_weights"]
+    type_weights = config.get("eval", {}).get("type_weights", {})
     weights = config["scoring"]
     budget = config["budget"]["max_api_calls"]
     min_tps = config["budget"].get("min_tokens_per_sec", 0)
@@ -403,12 +541,10 @@ def coordinate_descent(
     param_order = list(search_space.keys())
 
     best_params = deepcopy(defaults)
-
-    # Track all tps/ttft values for normalization
     all_tps = []
     all_ttft = []
 
-    # Phase 1: Evaluate baseline (defaults)
+    # Phase 1: Baseline
     print(f"\n  --- Baseline evaluation ---")
     phase = "baseline"
     key = _experiment_key(infra_config, model, phase, "none", *[defaults[p] for p in param_order])
@@ -423,16 +559,16 @@ def coordinate_descent(
             param_being_optimized="none", params=defaults,
             eval_prompts=eval_prompts, base_url=base_url,
             judge_model=judge_model, judge_weights=judge_weights,
+            type_weights=type_weights,
             details_path=details_path, min_tokens_per_sec=min_tps,
         )
         api_call_count[0] += len(eval_prompts)
 
         all_tps.append(baseline_result.avg_tokens_per_sec)
         all_ttft.append(baseline_result.avg_ttft_ms)
-
-        # For baseline, use raw quality as composite (no normalization data yet)
         baseline_composite = baseline_result.avg_quality
 
+        type_notes = " ".join(f"{t}={v:.2f}" for t, v in sorted(baseline_result.quality_by_type.items()))
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "infra_config": infra_config,
@@ -441,24 +577,29 @@ def coordinate_descent(
             "param_being_optimized": "none",
             "tokens_per_sec": f"{baseline_result.avg_tokens_per_sec:.2f}",
             "ttft_ms": f"{baseline_result.avg_ttft_ms:.0f}",
+            "objective_score": f"{baseline_result.avg_objective_score:.2f}",
+            "judge_score": f"{baseline_result.avg_judge_score:.2f}",
             "quality_score": f"{baseline_result.avg_quality:.2f}",
             "composite_score": f"{baseline_composite:.2f}",
             "is_best": "true",
-            "notes": "baseline",
+            "notes": f"baseline {type_notes}",
         }
         for p in param_order:
             row[p] = defaults[p]
         append_tsv(tsv_path, row)
     else:
         print("  Baseline already evaluated, skipping.")
-        baseline_composite = 5.0  # Placeholder for resume
-        baseline_result = EvalResult(avg_quality=5.0, avg_tokens_per_sec=30.0, avg_ttft_ms=500.0, per_prompt=[])
+        baseline_composite = 5.0
+        baseline_result = EvalResult(
+            avg_quality=5.0, avg_objective_score=0.5, avg_judge_score=5.0,
+            avg_tokens_per_sec=30.0, avg_ttft_ms=500.0, per_prompt=[],
+        )
         all_tps.append(baseline_result.avg_tokens_per_sec)
         all_ttft.append(baseline_result.avg_ttft_ms)
 
     best_composite = baseline_composite
 
-    # Phase 2: Coordinate descent — optimize one parameter at a time
+    # Phase 2: Coordinate descent
     for param_name in param_order:
         print(f"\n  --- Optimizing: {param_name} ---")
         phase = "sweep"
@@ -468,7 +609,6 @@ def coordinate_descent(
 
         for value in search_space[param_name]:
             if value == best_params[param_name]:
-                # Already evaluated at this value (it's the current best/default)
                 continue
 
             trial_params = deepcopy(best_params)
@@ -480,7 +620,7 @@ def coordinate_descent(
                 if prior_composite > best_composite_for_param:
                     best_value_for_param = value
                     best_composite_for_param = prior_composite
-                print(f"    {param_name}={value}: already evaluated, skipping (composite={prior_composite:.2f})")
+                print(f"    {param_name}={value}: already evaluated (composite={prior_composite:.2f})")
                 continue
 
             if api_call_count[0] >= budget:
@@ -491,11 +631,13 @@ def coordinate_descent(
             if param_name == "num_ctx":
                 unload_model(model, base_url)
             load_time = datetime.now(timezone.utc).isoformat()
+
             result = evaluate_params(
                 model=model, infra_config=infra_config, phase="sweep",
                 param_being_optimized=param_name, params=trial_params,
                 eval_prompts=eval_prompts, base_url=base_url,
                 judge_model=judge_model, judge_weights=judge_weights,
+                type_weights=type_weights,
                 details_path=details_path, min_tokens_per_sec=min_tps,
             )
             api_call_count[0] += len(eval_prompts)
@@ -516,7 +658,6 @@ def coordinate_descent(
             all_tps.append(result.avg_tokens_per_sec)
             all_ttft.append(result.avg_ttft_ms)
 
-            # Compute composite with current normalization ranges
             tps_range = (min(all_tps), max(all_tps))
             ttft_range = (min(all_ttft), max(all_ttft))
             composite = compute_composite(
@@ -526,6 +667,7 @@ def coordinate_descent(
 
             is_best = composite > best_composite_for_param
 
+            type_notes = " ".join(f"{t}={v:.2f}" for t, v in sorted(result.quality_by_type.items()))
             row = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "infra_config": infra_config,
@@ -534,10 +676,12 @@ def coordinate_descent(
                 "param_being_optimized": param_name,
                 "tokens_per_sec": f"{result.avg_tokens_per_sec:.2f}",
                 "ttft_ms": f"{result.avg_ttft_ms:.0f}",
+                "objective_score": f"{result.avg_objective_score:.2f}",
+                "judge_score": f"{result.avg_judge_score:.2f}",
                 "quality_score": f"{result.avg_quality:.2f}",
                 "composite_score": f"{composite:.2f}",
                 "is_best": str(is_best).lower(),
-                "notes": "",
+                "notes": type_notes,
             }
             for p in param_order:
                 row[p] = trial_params[p]
@@ -548,7 +692,6 @@ def coordinate_descent(
                 best_value_for_param = value
                 best_composite_for_param = composite
 
-        # Lock in best value for this parameter before moving to next
         best_params[param_name] = best_value_for_param
         best_composite = best_composite_for_param
         print(f"  Best {param_name}: {best_value_for_param} (composite: {best_composite:.2f})")
@@ -560,17 +703,15 @@ def validate_config(config: dict) -> None:
     """Validate config.yaml has all required keys. Exits with a clear message on failure."""
     errors = []
 
-    # infra section
-    infra = config.get("infra", {})
+    # infra
     for key in ("ollama_host", "ollama_port", "compose_dir", "compose_project", "ollama_volume"):
-        if key not in infra:
+        if key not in config.get("infra", {}):
             errors.append(f"  missing: infra.{key}")
 
-    # models
     if not config.get("models"):
         errors.append("  missing or empty: models")
 
-    # search_space and defaults must have the same keys
+    # search_space / defaults must match
     search_space = config.get("search_space", {})
     defaults = config.get("defaults", {})
     if not search_space:
@@ -584,7 +725,7 @@ def validate_config(config: dict) -> None:
         if key not in search_space:
             errors.append(f"  defaults key '{key}' has no entry in search_space")
 
-    # scoring weights
+    # scoring
     scoring = config.get("scoring", {})
     for key in ("quality_weight", "speed_weight", "ttft_weight"):
         if key not in scoring:
@@ -594,15 +735,38 @@ def validate_config(config: dict) -> None:
         if abs(total - 1.0) > 0.01:
             print(f"  WARNING: scoring weights sum to {total:.3f}, expected 1.0")
 
+    # eval
+    eval_cfg = config.get("eval", {})
+    active_types = eval_cfg.get("types", [])
+    if not active_types:
+        errors.append("  missing or empty: eval.types")
+    for t in active_types:
+        if t not in ("coding", "tool_call"):
+            errors.append(f"  eval.types contains unknown type: '{t}'")
+    type_weights = eval_cfg.get("type_weights", {})
+    if len(active_types) > 1:
+        for t in active_types:
+            if t not in type_weights:
+                errors.append(f"  eval.type_weights missing entry for active type: '{t}'")
+        if type_weights:
+            total = sum(type_weights.get(t, 0) for t in active_types)
+            if abs(total - 1.0) > 0.01:
+                print(f"  WARNING: eval.type_weights sum to {total:.3f}, expected 1.0")
+
     # judge quality_weights
     quality_weights = config.get("judge", {}).get("quality_weights", {})
-    for key in ("correctness", "completeness", "clarity", "agent_utility"):
-        if key not in quality_weights:
-            errors.append(f"  missing: judge.quality_weights.{key}")
-    if quality_weights:
-        total = sum(quality_weights.get(k, 0) for k in ("correctness", "completeness", "clarity", "agent_utility"))
-        if abs(total - 1.0) > 0.01:
-            print(f"  WARNING: judge.quality_weights sum to {total:.3f}, expected 1.0")
+    if "coding" in active_types:
+        for key in ("coding_correctness", "coding_completeness", "coding_clarity", "coding_agent_utility"):
+            if key not in quality_weights:
+                errors.append(f"  missing: judge.quality_weights.{key}")
+    if "tool_call" in active_types:
+        for key in ("objective_weight", "judge_weight", "tool_arg_correctness", "tool_selection"):
+            if key not in quality_weights:
+                errors.append(f"  missing: judge.quality_weights.{key}")
+        if "objective_weight" in quality_weights and "judge_weight" in quality_weights:
+            total = quality_weights["objective_weight"] + quality_weights["judge_weight"]
+            if abs(total - 1.0) > 0.01:
+                print(f"  WARNING: objective_weight + judge_weight sum to {total:.3f}, expected 1.0")
 
     # budget
     if "max_api_calls" not in config.get("budget", {}):
@@ -615,11 +779,10 @@ def validate_config(config: dict) -> None:
         sys.exit(1)
 
 
-
 def main():
     config = load_config()
     validate_config(config)
-    eval_prompts = load_eval_prompts()
+    eval_prompts = load_eval_prompts(config)
     tsv_path = "results.tsv"
     details_path = "details.jsonl"
     init_tsv(tsv_path)
@@ -635,24 +798,24 @@ def main():
     preflight_check(config)
 
     completed, completed_scores = load_completed_experiments(tsv_path)
-    api_call_count = [0]  # Mutable counter shared across calls
+    api_call_count = [0]
 
+    active_types = config.get("eval", {}).get("types", [])
     print("autotune-ollama starting")
     print(f"  Ollama: {base_url}")
     print(f"  Models: {len(models)}")
     print(f"  Infra configs: {len(infra_configs)}")
+    print(f"  Eval types: {', '.join(active_types)}")
     print(f"  Eval prompts: {len(eval_prompts)}")
     print(f"  Completed experiments (resume): {len(completed)}")
     print(f"  API budget: {config['budget']['max_api_calls']}")
     print()
 
     for infra_config in infra_configs:
-        # Switch infra config by restarting the Docker container
         if not switch_infra_config(infra_config, compose_dir, compose_project, ollama_volume):
             print(f"  SKIPPING infra config: {infra_config} (switch failed)")
             continue
 
-        # Wait for API to come up after container restart
         if not wait_for_api(base_url, timeout=90):
             print(f"  SKIPPING infra config: {infra_config} (API not ready after 90s)")
             continue
@@ -662,22 +825,18 @@ def main():
             print(f"Model: {model} | Infra: {infra_config}")
             print(f"{'='*60}")
 
-            # Pull model
             try:
                 pull_model(model, base_url)
             except Exception as e:
                 print(f"  SKIPPING model {model}: pull failed ({e})")
                 continue
 
-            # Check GPU fit
             if not check_gpu_fit(model, base_url):
                 print(f"  SKIPPING model {model}: does not fit in GPU")
                 continue
 
-            # Warmup
             warmup(model, base_url)
 
-            # Run coordinate descent
             best_params = coordinate_descent(
                 model=model,
                 infra_config=infra_config,

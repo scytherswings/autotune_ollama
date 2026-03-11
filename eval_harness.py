@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -20,6 +20,28 @@ class InferenceResult:
     eval_duration_ns: int
     prompt_eval_duration_ns: int
     total_duration_ns: int
+
+
+@dataclass
+class ToolCallResult:
+    """Result from a tool-calling inference run."""
+    tool_calls: list          # [{"function": {"name": str, "arguments": dict}}]
+    response_text: str        # any text the model produced alongside tool calls
+    tokens_per_sec: float
+    ttft_ms: float
+    eval_count: int
+    used_native_tools: bool   # True = Ollama tools param worked; False = text fallback
+
+
+@dataclass
+class ObjectiveResult:
+    """Deterministic (free) checks on a model response."""
+    json_valid: bool          # tool call is parseable / well-formed
+    correct_tool: bool        # called the expected tool (or correctly called nothing)
+    fields_present: bool      # all required_args present in the call
+    no_spurious_call: bool    # didn't call a tool when none was expected
+    objective_score: float    # fraction of applicable checks passed (0.0–1.0)
+    details: dict = field(default_factory=dict)
 
 
 def ollama_url(host: str, port: int) -> str:
@@ -148,6 +170,168 @@ def unload_model(model: str, base_url: str) -> None:
         )
     except requests.RequestException:
         pass  # Best-effort — if it fails the model may already be unloaded
+
+
+def run_tool_inference(
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    tools: list,
+    options: dict,
+    base_url: str,
+) -> ToolCallResult:
+    """Run inference with Ollama's native tools parameter and measure performance.
+
+    Falls back to parsing JSON from text if the model doesn't emit native tool calls.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    request_body = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "stream": True,
+        "options": options,
+    }
+
+    start_time = time.perf_counter()
+    first_token_time = None
+    response_chunks = []
+    tool_calls = []
+    eval_count = 0
+    eval_duration_ns = 0
+
+    resp = requests.post(
+        f"{base_url}/api/chat",
+        json=request_body,
+        stream=True,
+        timeout=300,
+    )
+    resp.raise_for_status()
+
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        data = json.loads(line)
+        msg = data.get("message", {})
+
+        if data.get("done", False):
+            eval_count = data.get("eval_count", 0)
+            eval_duration_ns = data.get("eval_duration", 0)
+            if msg.get("tool_calls"):
+                tool_calls = msg["tool_calls"]
+        else:
+            content = msg.get("content", "")
+            if content and first_token_time is None:
+                first_token_time = time.perf_counter()
+            response_chunks.append(content)
+            # Some models stream tool_calls in intermediate chunks
+            if msg.get("tool_calls"):
+                tool_calls = msg["tool_calls"]
+
+    ttft_ms = ((first_token_time or time.perf_counter()) - start_time) * 1000
+    raw_text = "".join(response_chunks)
+    tokens_per_sec = eval_count / (eval_duration_ns / 1e9) if eval_duration_ns > 0 else 0.0
+    used_native = bool(tool_calls)
+
+    # Fallback: try to parse a JSON tool call from text response
+    if not tool_calls and raw_text.strip():
+        tool_calls = _parse_tool_call_from_text(raw_text)
+
+    return ToolCallResult(
+        tool_calls=tool_calls,
+        response_text=raw_text,
+        tokens_per_sec=tokens_per_sec,
+        ttft_ms=ttft_ms,
+        eval_count=eval_count,
+        used_native_tools=used_native,
+    )
+
+
+def _parse_tool_call_from_text(text: str) -> list:
+    """Try to extract a tool call JSON from a plain-text response (non-native fallback)."""
+    try:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            return []
+        obj = json.loads(text[start:end])
+        # Accept {"name": ..., "arguments": ...} or {"function": {"name": ..., "arguments": ...}}
+        if "name" in obj and "arguments" in obj:
+            return [{"function": obj}]
+        if "function" in obj and "name" in obj.get("function", {}):
+            return [obj]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return []
+
+
+def check_objective_criteria(
+    prompt_entry: dict,
+    tool_calls: list,
+    response_text: str,
+) -> ObjectiveResult:
+    """Run free deterministic checks against expected outcomes in the prompt definition.
+
+    For tool_call prompts: checks JSON validity, correct tool name, required fields.
+    For rag prompts: checks for hallucination trap phrases.
+    """
+    prompt_type = prompt_entry.get("category", "tool_call")
+    checks = {}
+
+    if prompt_type == "tool_call":
+        expected_tool = prompt_entry.get("expected_tool")   # None = should not call a tool
+        required_args = set(prompt_entry.get("required_args", []))
+
+        if expected_tool is None:
+            # Model should NOT call any tool
+            checks["no_spurious_call"] = len(tool_calls) == 0
+            checks["json_valid"] = True       # N/A
+            checks["correct_tool"] = True     # N/A
+            checks["fields_present"] = True   # N/A
+        else:
+            checks["no_spurious_call"] = True  # N/A (tool call was expected)
+
+            if tool_calls:
+                fn = tool_calls[0].get("function", {})
+                tool_name = fn.get("name", "")
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, ValueError):
+                        args = {}
+
+                checks["json_valid"] = isinstance(args, dict)
+                checks["correct_tool"] = (tool_name == expected_tool)
+                checks["fields_present"] = required_args.issubset(set(args.keys())) if isinstance(args, dict) else False
+            else:
+                checks["json_valid"] = False
+                checks["correct_tool"] = False
+                checks["fields_present"] = False
+
+    elif prompt_type == "rag":
+        traps = prompt_entry.get("hallucination_traps", [])
+        text_lower = response_text.lower()
+        trapped = any(trap.lower() in text_lower for trap in traps)
+        checks["no_spurious_call"] = True   # N/A
+        checks["json_valid"] = True          # N/A
+        checks["correct_tool"] = True        # N/A
+        checks["fields_present"] = not trapped  # repurposed: True = no hallucination trap hit
+
+    passed = sum(1 for v in checks.values() if v)
+    objective_score = passed / len(checks) if checks else 0.0
+
+    return ObjectiveResult(
+        json_valid=checks.get("json_valid", True),
+        correct_tool=checks.get("correct_tool", True),
+        fields_present=checks.get("fields_present", True),
+        no_spurious_call=checks.get("no_spurious_call", True),
+        objective_score=objective_score,
+        details=checks,
+    )
 
 
 def check_gpu_fit(model: str, base_url: str) -> bool:
