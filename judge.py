@@ -1,9 +1,10 @@
 """Quality judging via Claude API — coding, tool-calling, and chat variants.
 
-Batch flow (used by evaluate_params):
-  1. build_judge_prompt()  — build prompt string per item, no API call
-  2. batch_judge()         — submit all as Message Batch, poll, parse results
-                             falls back to synchronous _call_judge on timeout/error
+Batch flow (used by evaluate_params / start_eval + finish_eval):
+  1. build_judge_prompt()    — build prompt string per item, no API call
+  2. submit_judge_batch()    — submit all as Message Batch, return batch_id immediately
+  3. collect_judge_batch()   — poll until ended, parse results, sync fallback on failure
+  batch_judge()              — convenience wrapper calling submit + collect in sequence
 
 Synchronous flow (used by generate_references, judge_comparison):
   judge_output / judge_tool_call / judge_chat — unchanged single-call functions
@@ -185,16 +186,14 @@ def _sync_judge_fallback(items: list[dict], model: str) -> dict[str, dict]:
     return results
 
 
-def batch_judge(
+def submit_judge_batch(
     items: list[dict],
     model: str,
-    timeout_s: float = 300,
-    poll_interval_s: float = 10,
-) -> dict[str, dict]:
-    """Submit all judge requests as a Message Batch (50% cheaper), poll, return {custom_id: scores}.
+) -> tuple[str, dict] | None:
+    """Build and submit a Message Batch. Returns (batch_id, required_keys_by_id) or None on failure.
 
     Each item: {custom_id, prompt_type, prompt_entry, response_text, tool_calls, reference}
-    Falls back to synchronous judging if batch times out or submission fails.
+    Returns None if submission fails — caller should fall back to synchronous judging.
     """
     client = _get_client()
 
@@ -221,31 +220,51 @@ def batch_judge(
     try:
         batch = client.messages.batches.create(requests=batch_requests)
         print(f"  Judge batch {batch.id} submitted ({len(batch_requests)} requests, model={model})")
+        return batch.id, required_keys_by_id
     except Exception as e:
-        print(f"  Batch submission failed ({e}), falling back to sync judging")
+        print(f"  Batch submission failed ({e}), will fall back to sync judging")
+        return None
+
+
+def collect_judge_batch(
+    batch_id: str | None,
+    required_keys_by_id: dict,
+    items: list[dict],
+    model: str,
+    timeout_s: float = 300,
+    poll_interval_s: float = 10,
+) -> dict[str, dict]:
+    """Poll a submitted batch until complete and parse results.
+
+    If batch_id is None (submission failed), falls back to synchronous judging immediately.
+    Falls back to sync judging per-item on timeout or parse errors.
+    """
+    client = _get_client()
+
+    if batch_id is None:
         return _sync_judge_fallback(items, model)
 
     # Poll until ended
     deadline = time.time() + timeout_s
     while True:
-        batch = client.messages.batches.retrieve(batch.id)
+        batch = client.messages.batches.retrieve(batch_id)
         if batch.processing_status == "ended":
             break
         remaining = int(deadline - time.time())
         if remaining <= 0:
-            print(f"  Batch timed out after {timeout_s}s, falling back to sync judging")
+            print(f"  Batch {batch_id} timed out after {timeout_s}s, falling back to sync judging")
             try:
-                client.messages.batches.cancel(batch.id)
+                client.messages.batches.cancel(batch_id)
             except Exception:
                 pass
             return _sync_judge_fallback(items, model)
-        print(f"  Batch processing... ({remaining}s remaining)")
+        print(f"  Batch {batch_id} processing... ({remaining}s remaining)")
         time.sleep(poll_interval_s)
 
     # Parse results
     results = {}
     failed_ids = []
-    for result in client.messages.batches.results(batch.id):
+    for result in client.messages.batches.results(batch_id):
         cid = result.custom_id
         required_keys = required_keys_by_id[cid]
         if result.result.type != "succeeded":
@@ -266,6 +285,25 @@ def batch_judge(
         results.update(_sync_judge_fallback(failed_items, model))
 
     return results
+
+
+def batch_judge(
+    items: list[dict],
+    model: str,
+    timeout_s: float = 300,
+    poll_interval_s: float = 10,
+) -> dict[str, dict]:
+    """Submit and collect a judge batch synchronously (convenience wrapper).
+
+    Each item: {custom_id, prompt_type, prompt_entry, response_text, tool_calls, reference}
+    For pipelined use, call submit_judge_batch() + collect_judge_batch() separately.
+    """
+    result = submit_judge_batch(items, model)
+    if result is None:
+        batch_id, required_keys_by_id = None, {}
+    else:
+        batch_id, required_keys_by_id = result
+    return collect_judge_batch(batch_id, required_keys_by_id, items, model, timeout_s, poll_interval_s)
 
 
 JUDGE_TOOL_CALL_TEMPLATE = """You are evaluating the quality of a tool call produced by a language model acting as a scheduling assistant.

@@ -32,7 +32,14 @@ from eval_harness import (
     wait_for_api,
     warmup,
 )
-from judge import batch_judge, judge_chat, judge_output, judge_tool_call
+from judge import (
+    batch_judge,
+    collect_judge_batch,
+    judge_chat,
+    judge_output,
+    judge_tool_call,
+    submit_judge_batch,
+)
 from preflight import preflight_check
 
 
@@ -76,6 +83,22 @@ class EvalResult:
     per_prompt: list
     quality_by_type: dict = field(default_factory=dict)  # {"coding": float, "tool_call": float}
     failed_count: int = 0
+
+
+@dataclass
+class PendingEval:
+    """In-flight evaluation: inferences done, judge batch submitted, collection deferred."""
+    model: str
+    judge_model: str
+    batch_id: str | None              # None = submission failed, collect_judge_batch will sync fallback
+    required_keys_by_id: dict
+    inference_data: list[dict]        # per-prompt inference results; also used as items for fallback
+    tps_values: list[float]
+    ttft_values: list[float]
+    total_time_values: list[float]
+    per_prompt: list                  # failure entries from inference phase
+    failed_count: int
+    load_time: str = ""               # ISO timestamp before first inference (for GPU alloc logging)
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -133,6 +156,12 @@ def load_eval_prompts(config: dict) -> list[dict]:
             if ts_key and ts_key in tool_sets:
                 entry["tools"] = tool_sets[ts_key]
             entry["reference"] = refs.get(p["id"])  # None if not yet generated
+            prompts.append(entry)
+
+    if "chat" in active_types:
+        for p in data.get("chat_prompts", []):
+            entry = dict(p)
+            entry["reference"] = refs.get(p["id"])
             prompts.append(entry)
 
     if not prompts:
@@ -536,6 +565,260 @@ def evaluate_params(
     )
 
 
+def start_eval(
+    model: str,
+    infra_config: str,
+    phase: str,
+    param_being_optimized: str,
+    params: dict,
+    eval_prompts: list[dict],
+    base_url: str,
+    judge_model: str,
+    judge_weights: dict,
+    type_weights: dict,
+    details_path: str,
+    min_tokens_per_sec: float = 0,
+    load_time: str = "",
+) -> PendingEval:
+    """Run all inferences and submit judge batch. Returns immediately after batch submit.
+
+    Raises TpsFailure or OllamaOomError if a critical inference failure occurs.
+    The caller should catch these and not call finish_eval.
+    """
+    inference_data: list[dict] = []
+    tps_values: list[float] = []
+    ttft_values: list[float] = []
+    total_time_values: list[float] = []
+    per_prompt: list = []
+    failed_count = 0
+
+    for prompt_entry in eval_prompts:
+        prompt_id = prompt_entry["id"]
+        prompt_type = prompt_entry.get("category", "coding")
+
+        try:
+            if prompt_type == "coding":
+                result = run_inference(
+                    model=model, prompt=prompt_entry["prompt"],
+                    options=params, base_url=base_url,
+                )
+                response_text = result.response_text
+                tool_calls = []
+                used_native = False
+
+            elif prompt_type == "tool_call":
+                result = run_tool_inference(
+                    model=model, system_prompt=prompt_entry["system_prompt"],
+                    user_message=prompt_entry["user_message"],
+                    tools=prompt_entry.get("tools", []),
+                    options=params, base_url=base_url,
+                )
+                response_text = result.response_text
+                tool_calls = result.tool_calls
+                used_native = result.used_native_tools
+
+            elif prompt_type == "chat":
+                result = run_chat_inference(
+                    model=model, system_prompt=prompt_entry.get("system_prompt"),
+                    turns=[t["content"] for t in prompt_entry["turns"]],
+                    options=params, base_url=base_url,
+                )
+                response_text = result.response_text
+                tool_calls = []
+                used_native = False
+
+            else:
+                print(f"    Skipping unknown prompt type '{prompt_type}' for {prompt_id}")
+                continue
+
+            tps = result.tokens_per_sec
+            ttft = result.ttft_ms
+            total_time = result.total_duration_ns / 1_000_000
+
+            if min_tokens_per_sec > 0 and tps < min_tokens_per_sec:
+                raise TpsFailure(
+                    f"TPS too low ({tps:.1f} < {min_tokens_per_sec} minimum) — likely CPU fallback"
+                )
+
+        except TpsFailure:
+            raise
+        except Exception as e:
+            print(f"    Inference failed for {prompt_id}: {e}")
+            per_prompt.append({"id": prompt_id, "type": prompt_type, "error": str(e)})
+            failed_count += 1
+            continue
+
+        if prompt_type == "tool_call":
+            objective = check_objective_criteria(prompt_entry, tool_calls, response_text)
+            objective_score = objective.objective_score
+        else:
+            objective_score = 1.0
+
+        print(f"    {prompt_id}: tps={tps:.1f} ttft={ttft:.0f}ms", flush=True)
+
+        inference_data.append({
+            "custom_id": prompt_id,
+            "prompt_type": prompt_type,
+            "prompt_entry": prompt_entry,
+            "response_text": response_text,
+            "tool_calls": tool_calls,
+            "reference": prompt_entry.get("reference"),
+            "objective_score": objective_score,
+            "tps": tps, "ttft": ttft, "total_time": total_time,
+            "used_native": used_native,
+        })
+
+        tps_values.append(tps)
+        ttft_values.append(ttft)
+        total_time_values.append(total_time)
+
+    # Submit batch (non-blocking — inference N+1 will run while this processes)
+    if inference_data:
+        submit_result = submit_judge_batch(inference_data, judge_model)
+        if submit_result is None:
+            batch_id, required_keys_by_id = None, {}
+        else:
+            batch_id, required_keys_by_id = submit_result
+    else:
+        batch_id, required_keys_by_id = None, {}
+
+    return PendingEval(
+        model=model,
+        judge_model=judge_model,
+        batch_id=batch_id,
+        required_keys_by_id=required_keys_by_id,
+        inference_data=inference_data,
+        tps_values=tps_values,
+        ttft_values=ttft_values,
+        total_time_values=total_time_values,
+        per_prompt=per_prompt,
+        failed_count=failed_count,
+        load_time=load_time,
+    )
+
+
+def finish_eval(
+    pending: PendingEval,
+    judge_weights: dict,
+    type_weights: dict,
+    infra_config: str,
+    phase: str,
+    param_being_optimized: str,
+    params: dict,
+    details_path: str,
+    timeout_s: float = 300,
+    poll_interval_s: float = 10,
+) -> EvalResult:
+    """Collect judge batch results and process into EvalResult.
+
+    Blocks until the batch is complete (or times out and falls back to sync).
+    """
+    model = pending.model
+    inference_data = pending.inference_data
+    per_prompt = list(pending.per_prompt)  # copy — preserve inference failure entries
+    failed_count = pending.failed_count
+
+    if not inference_data:
+        return EvalResult(
+            avg_quality=0, avg_objective_score=0, avg_judge_score=0,
+            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), avg_total_time_ms=float("inf"),
+            per_prompt=per_prompt, quality_by_type={}, failed_count=failed_count,
+        )
+
+    scores_map = collect_judge_batch(
+        pending.batch_id, pending.required_keys_by_id,
+        inference_data, pending.judge_model, timeout_s, poll_interval_s,
+    )
+
+    # Process results
+    per_type_quality: dict[str, list[float]] = {}
+    all_judge_scores: list[float] = []
+
+    for d in inference_data:
+        prompt_id = d["custom_id"]
+        prompt_type = d["prompt_type"]
+        prompt_entry = d["prompt_entry"]
+        scores = scores_map[prompt_id]
+        objective_score = d["objective_score"]
+        tps, ttft = d["tps"], d["ttft"]
+        tool_calls = d["tool_calls"]
+        used_native = d["used_native"]
+
+        quality, judge_score = compute_quality(scores, prompt_type, judge_weights, objective_score)
+
+        append_details(
+            details_path=details_path, infra_config=infra_config, model=model,
+            phase=phase, param_being_optimized=param_being_optimized, params=params,
+            prompt_id=prompt_id, prompt_type=prompt_type, objective_score=objective_score,
+            judge_scores=scores, judge_score=judge_score, quality=quality,
+            tokens_per_sec=tps, ttft_ms=ttft, used_native_tools=used_native,
+        )
+
+        per_type_quality.setdefault(prompt_type, []).append(quality)
+        all_judge_scores.append(judge_score)
+
+        per_prompt.append({
+            "id": prompt_id, "type": prompt_type, "quality": quality,
+            "objective": objective_score, "judge": judge_score,
+            "tokens_per_sec": tps, "ttft_ms": ttft,
+            "rationale": scores.get("brief_rationale", ""),
+        })
+
+        if prompt_type == "coding":
+            print(f"    {prompt_id}: quality={quality:.2f} "
+                  f"(c={scores.get('correctness',0):.0f} co={scores.get('completeness',0):.0f} "
+                  f"cl={scores.get('clarity',0):.0f} a={scores.get('agent_utility',0):.0f})")
+        elif prompt_type == "chat":
+            n_turns = len(prompt_entry.get("turns", []))
+            print(f"    {prompt_id}: quality={quality:.2f} "
+                  f"(if={scores.get('instruction_following',0):.0f} cq={scores.get('content_quality',0):.0f} "
+                  f"pr={scores.get('professionalism',0):.0f} cn={scores.get('conciseness',0):.0f} "
+                  f"cr={scores.get('context_retention',0):.0f}) turns={n_turns}")
+        else:
+            called = tool_calls[0]["function"]["name"] if tool_calls else "none"
+            native = "native" if used_native else "text"
+            print(f"    {prompt_id}: quality={quality:.2f} obj={objective_score:.2f} "
+                  f"judge={judge_score:.1f} tool={called} ({native})")
+
+    if not per_type_quality:
+        return EvalResult(
+            avg_quality=0, avg_objective_score=0, avg_judge_score=0,
+            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), avg_total_time_ms=float("inf"),
+            per_prompt=per_prompt, quality_by_type={}, failed_count=failed_count,
+        )
+
+    quality_by_type = {t: sum(v) / len(v) for t, v in per_type_quality.items()}
+
+    if type_weights and len(quality_by_type) > 1:
+        total_w = sum(type_weights.get(t, 0) for t in quality_by_type)
+        if total_w > 0:
+            blended = sum(quality_by_type[t] * type_weights.get(t, 0) for t in quality_by_type) / total_w
+        else:
+            blended = sum(quality_by_type.values()) / len(quality_by_type)
+    else:
+        blended = sum(quality_by_type.values()) / len(quality_by_type)
+
+    if len(quality_by_type) > 1:
+        type_summary = "  ".join(f"{t}={v:.2f}" for t, v in sorted(quality_by_type.items()))
+        print(f"    → per-type: {type_summary}  blended={blended:.2f}")
+
+    per_type_obj = [d["objective_score"] for d in inference_data if d["prompt_type"] == "tool_call"]
+    avg_obj = sum(per_type_obj) / len(per_type_obj) if per_type_obj else 1.0
+    avg_judge = sum(all_judge_scores) / len(all_judge_scores)
+
+    return EvalResult(
+        avg_quality=round(blended, 4),
+        avg_objective_score=round(avg_obj, 4),
+        avg_judge_score=round(avg_judge, 4),
+        avg_tokens_per_sec=sum(pending.tps_values) / len(pending.tps_values),
+        avg_ttft_ms=sum(pending.ttft_values) / len(pending.ttft_values),
+        avg_total_time_ms=sum(pending.total_time_values) / len(pending.total_time_values),
+        per_prompt=per_prompt,
+        quality_by_type=quality_by_type,
+        failed_count=failed_count,
+    )
+
+
 def compute_composite(
     quality: float,
     total_time_ms: float,
@@ -664,6 +947,11 @@ def coordinate_descent(
         best_value_for_param = best_params[param_name]
         best_composite_for_param = best_composite
 
+        # Pass 1: run inferences + submit judge batches for all values sequentially.
+        # Each batch processes on Anthropic's end while the next inference runs locally.
+        pending_evals: list[dict] = []
+        budget_hit = False
+
         for value in search_space[param_name]:
             if value == best_params[param_name]:
                 continue
@@ -673,16 +961,17 @@ def coordinate_descent(
 
             key = _experiment_key(infra_config, model, phase, param_name, *[trial_params[p] for p in param_order])
             if key in completed:
-                prior_composite = completed_scores.get(key, 0.0)
-                if prior_composite > best_composite_for_param:
-                    best_value_for_param = value
-                    best_composite_for_param = prior_composite
-                print(f"    {param_name}={value}: already evaluated (composite={prior_composite:.2f})")
+                pending_evals.append({
+                    "status": "already_done", "value": value, "key": key,
+                    "trial_params": trial_params, "pending": None,
+                    "prior_composite": completed_scores.get(key, 0.0),
+                })
                 continue
 
             if api_call_count[0] >= budget:
                 print("  Budget exhausted!")
-                return best_params
+                budget_hit = True
+                break
 
             print(f"    Trying {param_name}={value}")
             if param_name == "num_ctx":
@@ -690,13 +979,13 @@ def coordinate_descent(
             load_time = datetime.now(timezone.utc).isoformat()
 
             try:
-                result = evaluate_params(
+                pending = start_eval(
                     model=model, infra_config=infra_config, phase="sweep",
                     param_being_optimized=param_name, params=trial_params,
                     eval_prompts=eval_prompts, base_url=base_url,
                     judge_model=judge_model_sweep, judge_weights=judge_weights,
-                    type_weights=type_weights,
-                    details_path=details_path, min_tokens_per_sec=min_tps,
+                    type_weights=type_weights, details_path=details_path,
+                    min_tokens_per_sec=min_tps, load_time=load_time,
                 )
             except (TpsFailure, OllamaOomError) as e:
                 label = "tps_fail" if isinstance(e, TpsFailure) else "oom"
@@ -716,17 +1005,52 @@ def coordinate_descent(
                 if param_name == "num_ctx":
                     break  # skip larger ctx values
                 continue
-            api_call_count[0] += len(eval_prompts)       # inference calls
-            api_call_count[0] += len(eval_prompts)       # judge calls
 
+            api_call_count[0] += len(eval_prompts)   # inference calls
+            pending_evals.append({
+                "status": "pending", "value": value, "key": key,
+                "trial_params": trial_params, "pending": pending,
+                "prior_composite": None,
+            })
+
+        # Pass 2: collect judge results in order (batches are likely already done).
+        for item in pending_evals:
+            value = item["value"]
+            key = item["key"]
+            trial_params = item["trial_params"]
+
+            if item["status"] == "already_done":
+                prior_composite = item["prior_composite"]
+                if prior_composite > best_composite_for_param:
+                    best_value_for_param = value
+                    best_composite_for_param = prior_composite
+                print(f"    {param_name}={value}: already evaluated (composite={prior_composite:.2f})")
+                continue
+
+            # status == "pending"
+            pending = item["pending"]
+
+            # GPU alloc logging for num_ctx (logged here so it appears before quality scores)
             if param_name == "num_ctx":
-                alloc = get_ollama_allocation(ollama_container, load_time)
+                alloc = get_ollama_allocation(ollama_container, pending.load_time)
                 if alloc:
                     gpu_layers = alloc.get("gpu_layers", "?")
                     total_layers = alloc.get("total_layers", "?")
                     kv_gpu = alloc.get("kv_gpu_mb", 0)
                     kv_cpu = alloc.get("kv_cpu_mb", 0)
                     print(f"    ollama: {gpu_layers}/{total_layers} layers on GPU  |  KV: {kv_gpu:.0f}MB GPU + {kv_cpu:.0f}MB CPU")
+
+            result = finish_eval(
+                pending=pending,
+                judge_weights=judge_weights,
+                type_weights=type_weights,
+                infra_config=infra_config,
+                phase="sweep",
+                param_being_optimized=param_name,
+                params=trial_params,
+                details_path=details_path,
+            )
+            api_call_count[0] += len(eval_prompts)   # judge calls
 
             if param_name == "num_ctx" and result.failed_count > 0:
                 # Generic (non-OOM) failures at this ctx — log but don't skip larger values
@@ -763,10 +1087,16 @@ def coordinate_descent(
                 row[p] = trial_params[p]
             append_tsv(tsv_path, row)
 
+            completed.add(key)
+            completed_scores[key] = composite
+
             if is_best:
                 print(f"    NEW BEST: {param_name}={value} (composite {composite:.2f} > {best_composite_for_param:.2f})")
                 best_value_for_param = value
                 best_composite_for_param = composite
+
+        if budget_hit:
+            return best_params
 
         best_params[param_name] = best_value_for_param
         best_composite = best_composite_for_param
@@ -826,7 +1156,7 @@ def validate_config(config: dict) -> None:
     if not active_types:
         errors.append("  missing or empty: eval.types")
     for t in active_types:
-        if t not in ("coding", "tool_call"):
+        if t not in ("coding", "tool_call", "chat"):
             errors.append(f"  eval.types contains unknown type: '{t}'")
     type_weights = eval_cfg.get("type_weights", {})
     if len(active_types) > 1:
@@ -852,6 +1182,12 @@ def validate_config(config: dict) -> None:
             total = quality_weights["objective_weight"] + quality_weights["judge_weight"]
             if abs(total - 1.0) > 0.01:
                 print(f"  WARNING: objective_weight + judge_weight sum to {total:.3f}, expected 1.0")
+
+    if "chat" in active_types:
+        for key in ("chat_instruction_following", "chat_content_quality", "chat_professionalism",
+                    "chat_conciseness", "chat_context_retention"):
+            if key not in quality_weights:
+                errors.append(f"  missing: judge.quality_weights.{key}")
 
     # budget
     if "max_api_calls" not in config.get("budget", {}):
