@@ -904,7 +904,14 @@ def coordinate_descent(
         api_call_count[0] += len(eval_prompts)           # judge calls (batched but still N requests)
 
         all_total_time.append(baseline_result.avg_total_time_ms)
-        baseline_composite = baseline_result.avg_quality
+        # Compute baseline composite on the same scale as sweep composites.
+        # Only one data point so far → t_min == t_max → latency_norm = 0.5 (neutral).
+        baseline_composite = compute_composite(
+            baseline_result.avg_quality,
+            baseline_result.avg_total_time_ms,
+            (baseline_result.avg_total_time_ms, baseline_result.avg_total_time_ms),
+            weights,
+        )
 
         type_notes = " ".join(f"{t}={v:.2f}" for t, v in sorted(baseline_result.quality_by_type.items()))
         row = {
