@@ -1,10 +1,21 @@
-"""Quality judging via Claude API — coding and tool-calling variants."""
+"""Quality judging via Claude API — coding, tool-calling, and chat variants.
+
+Batch flow (used by evaluate_params):
+  1. build_judge_prompt()  — build prompt string per item, no API call
+  2. batch_judge()         — submit all as Message Batch, poll, parse results
+                             falls back to synchronous _call_judge on timeout/error
+
+Synchronous flow (used by generate_references, judge_comparison):
+  judge_output / judge_tool_call / judge_chat — unchanged single-call functions
+"""
 
 import json
 import os
 import time
 
 import anthropic
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request as BatchRequest
 
 # Lazy singleton — instantiated once on first judge call
 _client: anthropic.Anthropic | None = None
@@ -66,6 +77,196 @@ def _call_judge(judge_prompt: str, model: str, required_keys: list, max_retries:
             time.sleep(wait)
 
     raise RuntimeError(f"Judge failed after {max_retries} retries — results not recorded")
+
+def build_judge_prompt(
+    prompt_type: str,
+    prompt_entry: dict,
+    response_text: str,
+    tool_calls: list | None = None,
+    reference: str | None = None,
+) -> tuple[str, list[str]]:
+    """Build judge prompt and required_keys for any prompt type without calling the API.
+
+    Used by batch_judge to build all requests before submitting as a batch.
+    """
+    if prompt_type == "coding":
+        judge_prompt = JUDGE_PROMPT_TEMPLATE.format(
+            reference=reference or "",
+            candidate=response_text,
+            prompt=prompt_entry["prompt"],
+        )
+        required_keys = ["correctness", "completeness", "clarity", "agent_utility", "brief_rationale"]
+
+    elif prompt_type == "tool_call":
+        tools = prompt_entry.get("tools", [])
+        tool_schema_text = json.dumps(
+            [{"name": t["function"]["name"],
+              "description": t["function"]["description"],
+              "parameters": t["function"]["parameters"]}
+             for t in tools],
+            indent=2,
+        )
+        if tool_calls:
+            model_response_text = json.dumps(
+                [{"tool": tc.get("function", {}).get("name"),
+                  "arguments": tc.get("function", {}).get("arguments", {})}
+                 for tc in tool_calls],
+                indent=2,
+            )
+        else:
+            model_response_text = (f"(No tool called)\nText response: {response_text[:500]}"
+                                   if response_text else "(No tool called, no text response)")
+        reference_section = (
+            f"\nReference (ideal response from a top-tier model):\n<reference>{reference}</reference>\n"
+            if reference else ""
+        )
+        judge_prompt = JUDGE_TOOL_CALL_TEMPLATE.format(
+            system_prompt=prompt_entry.get("system_prompt", ""),
+            user_message=prompt_entry["user_message"],
+            tool_schemas=tool_schema_text,
+            reference_section=reference_section,
+            model_response=model_response_text,
+        )
+        required_keys = ["arg_correctness", "tool_selection", "brief_rationale"]
+
+    elif prompt_type == "chat":
+        turns = prompt_entry.get("turns", [])
+        history_text = "\n\n".join(f"[USER]: {t['content']}" for t in turns)
+        reference_section = (
+            f"\nReference (ideal response from a top-tier model):\n<reference>{reference}</reference>\n"
+            if reference else ""
+        )
+        judge_prompt = JUDGE_CHAT_TEMPLATE.format(
+            system_prompt=prompt_entry.get("system_prompt", ""),
+            conversation_history=history_text,
+            response=response_text,
+            reference_section=reference_section,
+        )
+        required_keys = ["instruction_following", "content_quality", "professionalism",
+                         "conciseness", "context_retention", "brief_rationale"]
+
+    else:
+        raise ValueError(f"Unknown prompt type: {prompt_type}")
+
+    return judge_prompt, required_keys
+
+
+def _parse_judge_text(text: str, required_keys: list) -> dict:
+    """Parse JSON from a judge response, validate required keys."""
+    prefixed = "{" + text.strip()
+    start = prefixed.find("{")
+    end = prefixed.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found")
+    scores = json.loads(prefixed[start:end])
+    for key in required_keys:
+        if key not in scores:
+            raise ValueError(f"Missing key: {key}")
+        if key != "brief_rationale":
+            scores[key] = float(scores[key])
+    return scores
+
+
+def _sync_judge_fallback(items: list[dict], model: str) -> dict[str, dict]:
+    """Synchronous fallback: call _call_judge for each item individually."""
+    results = {}
+    for item in items:
+        judge_prompt, required_keys = build_judge_prompt(
+            item["prompt_type"], item["prompt_entry"],
+            item["response_text"], item.get("tool_calls"), item.get("reference"),
+        )
+        try:
+            results[item["custom_id"]] = _call_judge(judge_prompt, model, required_keys)
+        except RuntimeError as e:
+            print(f"  Sync judge failed for {item['custom_id']}: {e}")
+            neutral = {k: 5.0 for k in required_keys if k != "brief_rationale"}
+            neutral["brief_rationale"] = "judge failed"
+            results[item["custom_id"]] = neutral
+    return results
+
+
+def batch_judge(
+    items: list[dict],
+    model: str,
+    timeout_s: float = 300,
+    poll_interval_s: float = 10,
+) -> dict[str, dict]:
+    """Submit all judge requests as a Message Batch (50% cheaper), poll, return {custom_id: scores}.
+
+    Each item: {custom_id, prompt_type, prompt_entry, response_text, tool_calls, reference}
+    Falls back to synchronous judging if batch times out or submission fails.
+    """
+    client = _get_client()
+
+    required_keys_by_id = {}
+    batch_requests = []
+    for item in items:
+        judge_prompt, required_keys = build_judge_prompt(
+            item["prompt_type"], item["prompt_entry"],
+            item["response_text"], item.get("tool_calls"), item.get("reference"),
+        )
+        required_keys_by_id[item["custom_id"]] = required_keys
+        batch_requests.append(BatchRequest(
+            custom_id=item["custom_id"],
+            params=MessageCreateParamsNonStreaming(
+                model=model,
+                max_tokens=512,
+                messages=[
+                    {"role": "user", "content": judge_prompt},
+                    {"role": "assistant", "content": "{"},
+                ],
+            ),
+        ))
+
+    try:
+        batch = client.messages.batches.create(requests=batch_requests)
+        print(f"  Judge batch {batch.id} submitted ({len(batch_requests)} requests, model={model})")
+    except Exception as e:
+        print(f"  Batch submission failed ({e}), falling back to sync judging")
+        return _sync_judge_fallback(items, model)
+
+    # Poll until ended
+    deadline = time.time() + timeout_s
+    while True:
+        batch = client.messages.batches.retrieve(batch.id)
+        if batch.processing_status == "ended":
+            break
+        remaining = int(deadline - time.time())
+        if remaining <= 0:
+            print(f"  Batch timed out after {timeout_s}s, falling back to sync judging")
+            try:
+                client.messages.batches.cancel(batch.id)
+            except Exception:
+                pass
+            return _sync_judge_fallback(items, model)
+        print(f"  Batch processing... ({remaining}s remaining)")
+        time.sleep(poll_interval_s)
+
+    # Parse results
+    results = {}
+    failed_ids = []
+    for result in client.messages.batches.results(batch.id):
+        cid = result.custom_id
+        required_keys = required_keys_by_id[cid]
+        if result.result.type != "succeeded":
+            print(f"  Batch item {cid}: {result.result.type}")
+            failed_ids.append(cid)
+            continue
+        try:
+            scores = _parse_judge_text(result.result.message.content[0].text, required_keys)
+            results[cid] = scores
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"  Batch parse error for {cid}: {e}")
+            failed_ids.append(cid)
+
+    # Retry any failures synchronously
+    if failed_ids:
+        print(f"  {len(failed_ids)} batch items failed, retrying synchronously")
+        failed_items = [item for item in items if item["custom_id"] in failed_ids]
+        results.update(_sync_judge_fallback(failed_items, model))
+
+    return results
+
 
 JUDGE_TOOL_CALL_TEMPLATE = """You are evaluating the quality of a tool call produced by a language model acting as a scheduling assistant.
 

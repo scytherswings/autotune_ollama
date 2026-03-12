@@ -60,7 +60,8 @@ scoring:
   latency_weight: 0.35  # total wall-clock time per prompt (includes thinking time)
 
 judge:
-  model: claude-sonnet-4-20250514
+  model: claude-sonnet-4-20250514        # used for baseline evals (accuracy matters)
+  sweep_model: claude-haiku-4-5-20251001 # used for sweep iterations (relative ranking only)
   quality_weights:
     coding_correctness: 0.40
     coding_completeness: 0.30

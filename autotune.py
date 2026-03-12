@@ -32,7 +32,7 @@ from eval_harness import (
     wait_for_api,
     warmup,
 )
-from judge import judge_chat, judge_output, judge_tool_call
+from judge import batch_judge, judge_chat, judge_output, judge_tool_call
 from preflight import preflight_check
 
 
@@ -338,9 +338,14 @@ def evaluate_params(
     details_path: str,
     min_tokens_per_sec: float = 0,
 ) -> EvalResult:
-    """Run all eval prompts, score with type-appropriate judge, return aggregated results."""
+    """Run all eval prompts, batch-judge all at once, return aggregated results.
+
+    Phase 1: run all inferences sequentially (prints TPS/TTFT as they complete)
+    Phase 2: submit all judge requests as a Message Batch (50% cheaper)
+    Phase 3: process results, log details, print quality scores
+    """
     per_type_quality: dict[str, list[float]] = {}
-    per_type_obj: list[float] = []   # only tool_call prompts contribute
+    per_type_obj: list[float] = []
     all_judge_scores: list[float] = []
     tps_values: list[float] = []
     ttft_values: list[float] = []
@@ -348,60 +353,51 @@ def evaluate_params(
     per_prompt = []
     failed_count = 0
 
+    # ── Phase 1: Inference ───────────────────────────────────────────────────
+    inference_data = []  # one dict per successful inference
+
     for prompt_entry in eval_prompts:
         prompt_id = prompt_entry["id"]
         prompt_type = prompt_entry.get("category", "coding")
 
-        # --- Inference ---
         try:
             if prompt_type == "coding":
                 result = run_inference(
-                    model=model,
-                    prompt=prompt_entry["prompt"],
-                    options=params,
-                    base_url=base_url,
+                    model=model, prompt=prompt_entry["prompt"],
+                    options=params, base_url=base_url,
                 )
                 response_text = result.response_text
                 tool_calls = []
-                tps = result.tokens_per_sec
-                ttft = result.ttft_ms
-                total_time = result.total_duration_ns / 1_000_000
                 used_native = False
 
             elif prompt_type == "tool_call":
                 result = run_tool_inference(
-                    model=model,
-                    system_prompt=prompt_entry["system_prompt"],
+                    model=model, system_prompt=prompt_entry["system_prompt"],
                     user_message=prompt_entry["user_message"],
                     tools=prompt_entry.get("tools", []),
-                    options=params,
-                    base_url=base_url,
+                    options=params, base_url=base_url,
                 )
                 response_text = result.response_text
                 tool_calls = result.tool_calls
-                tps = result.tokens_per_sec
-                ttft = result.ttft_ms
-                total_time = result.total_duration_ns / 1_000_000
                 used_native = result.used_native_tools
 
             elif prompt_type == "chat":
                 result = run_chat_inference(
-                    model=model,
-                    system_prompt=prompt_entry.get("system_prompt"),
+                    model=model, system_prompt=prompt_entry.get("system_prompt"),
                     turns=[t["content"] for t in prompt_entry["turns"]],
-                    options=params,
-                    base_url=base_url,
+                    options=params, base_url=base_url,
                 )
                 response_text = result.response_text
                 tool_calls = []
-                tps = result.tokens_per_sec
-                ttft = result.ttft_ms
-                total_time = result.total_duration_ns / 1_000_000
                 used_native = False
 
             else:
                 print(f"    Skipping unknown prompt type '{prompt_type}' for {prompt_id}")
                 continue
+
+            tps = result.tokens_per_sec
+            ttft = result.ttft_ms
+            total_time = result.total_duration_ns / 1_000_000
 
             if min_tokens_per_sec > 0 and tps < min_tokens_per_sec:
                 raise TpsFailure(
@@ -409,108 +405,95 @@ def evaluate_params(
                 )
 
         except TpsFailure:
-            raise  # abort the entire eval run immediately
+            raise
         except Exception as e:
             print(f"    Inference failed for {prompt_id}: {e}")
             per_prompt.append({"id": prompt_id, "type": prompt_type, "error": str(e)})
             failed_count += 1
             continue
 
-        # --- Objective checks ---
+        # Objective checks (free — no API call)
         if prompt_type == "tool_call":
             objective = check_objective_criteria(prompt_entry, tool_calls, response_text)
             objective_score = objective.objective_score
             per_type_obj.append(objective_score)
         else:
-            objective_score = 1.0  # N/A for coding
+            objective_score = 1.0
 
-        # --- Claude judge (fatal errors propagate to abort the run) ---
-        reference = prompt_entry.get("reference")
-        if prompt_type == "coding":
-            scores = judge_output(
-                prompt=prompt_entry["prompt"],
-                candidate=response_text,
-                reference=reference or "",
-                model=judge_model,
-            )
-        elif prompt_type == "chat":
-            # Build conversation history up to (but not including) the final response
-            conversation = []
-            if prompt_entry.get("system_prompt"):
-                conversation.append({"role": "system", "content": prompt_entry["system_prompt"]})
-            turns = prompt_entry.get("turns", [])
-            for i, turn in enumerate(turns[:-1]):
-                conversation.append({"role": "user", "content": turn["content"]})
-                # We don't have intermediate responses stored, so the judge sees the turns only
-                # (for single-turn prompts this is just the one user message)
-            conversation.append({"role": "user", "content": turns[-1]["content"]})
-            scores = judge_chat(
-                prompt_entry=prompt_entry,
-                conversation=conversation,
-                response_text=response_text,
-                reference=reference,
-                model=judge_model,
-            )
-        else:  # tool_call
-            scores = judge_tool_call(
-                prompt_entry, tool_calls, response_text,
-                reference=reference,
-                model=judge_model,
-            )
+        print(f"    {prompt_id}: tps={tps:.1f} ttft={ttft:.0f}ms", flush=True)
 
-        quality, judge_score = compute_quality(scores, prompt_type, judge_weights, objective_score)
+        inference_data.append({
+            "custom_id": prompt_id,
+            "prompt_type": prompt_type,
+            "prompt_entry": prompt_entry,
+            "response_text": response_text,
+            "tool_calls": tool_calls,
+            "reference": prompt_entry.get("reference"),
+            "objective_score": objective_score,
+            "tps": tps, "ttft": ttft, "total_time": total_time,
+            "used_native": used_native,
+        })
 
-        append_details(
-            details_path=details_path,
-            infra_config=infra_config,
-            model=model,
-            phase=phase,
-            param_being_optimized=param_being_optimized,
-            params=params,
-            prompt_id=prompt_id,
-            prompt_type=prompt_type,
-            objective_score=objective_score,
-            judge_scores=scores,
-            judge_score=judge_score,
-            quality=quality,
-            tokens_per_sec=tps,
-            ttft_ms=ttft,
-            used_native_tools=used_native,
-        )
-
-        per_type_quality.setdefault(prompt_type, []).append(quality)
-        all_judge_scores.append(judge_score)
         tps_values.append(tps)
         ttft_values.append(ttft)
         total_time_values.append(total_time)
 
+    if not inference_data:
+        return EvalResult(
+            avg_quality=0, avg_objective_score=0, avg_judge_score=0,
+            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), avg_total_time_ms=float("inf"),
+            per_prompt=per_prompt, quality_by_type={}, failed_count=failed_count,
+        )
+
+    # ── Phase 2: Batch judge ─────────────────────────────────────────────────
+    scores_map = batch_judge(inference_data, judge_model)
+
+    # ── Phase 3: Process results ─────────────────────────────────────────────
+    for d in inference_data:
+        prompt_id = d["custom_id"]
+        prompt_type = d["prompt_type"]
+        prompt_entry = d["prompt_entry"]
+        scores = scores_map[prompt_id]
+        objective_score = d["objective_score"]
+        tps, ttft = d["tps"], d["ttft"]
+        tool_calls = d["tool_calls"]
+        used_native = d["used_native"]
+
+        quality, judge_score = compute_quality(scores, prompt_type, judge_weights, objective_score)
+
+        append_details(
+            details_path=details_path, infra_config=infra_config, model=model,
+            phase=phase, param_being_optimized=param_being_optimized, params=params,
+            prompt_id=prompt_id, prompt_type=prompt_type, objective_score=objective_score,
+            judge_scores=scores, judge_score=judge_score, quality=quality,
+            tokens_per_sec=tps, ttft_ms=ttft, used_native_tools=used_native,
+        )
+
+        per_type_quality.setdefault(prompt_type, []).append(quality)
+        all_judge_scores.append(judge_score)
+
         per_prompt.append({
-            "id": prompt_id,
-            "type": prompt_type,
-            "quality": quality,
-            "objective": objective_score,
-            "judge": judge_score,
-            "tokens_per_sec": tps,
-            "ttft_ms": ttft,
+            "id": prompt_id, "type": prompt_type, "quality": quality,
+            "objective": objective_score, "judge": judge_score,
+            "tokens_per_sec": tps, "ttft_ms": ttft,
             "rationale": scores.get("brief_rationale", ""),
         })
 
         if prompt_type == "coding":
             print(f"    {prompt_id}: quality={quality:.2f} "
                   f"(c={scores.get('correctness',0):.0f} co={scores.get('completeness',0):.0f} "
-                  f"cl={scores.get('clarity',0):.0f} a={scores.get('agent_utility',0):.0f}) "
-                  f"tps={tps:.1f} ttft={ttft:.0f}ms")
+                  f"cl={scores.get('clarity',0):.0f} a={scores.get('agent_utility',0):.0f})")
         elif prompt_type == "chat":
             n_turns = len(prompt_entry.get("turns", []))
             print(f"    {prompt_id}: quality={quality:.2f} "
                   f"(if={scores.get('instruction_following',0):.0f} cq={scores.get('content_quality',0):.0f} "
                   f"pr={scores.get('professionalism',0):.0f} cn={scores.get('conciseness',0):.0f} "
-                  f"cr={scores.get('context_retention',0):.0f}) turns={n_turns} tps={tps:.1f} ttft={ttft:.0f}ms")
+                  f"cr={scores.get('context_retention',0):.0f}) turns={n_turns}")
         else:
             called = tool_calls[0]["function"]["name"] if tool_calls else "none"
             native = "native" if used_native else "text"
             print(f"    {prompt_id}: quality={quality:.2f} obj={objective_score:.2f} "
-                  f"judge={judge_score:.1f} tool={called} ({native}) tps={tps:.1f} ttft={ttft:.0f}ms")
+                  f"judge={judge_score:.1f} tool={called} ({native})")
 
     if not per_type_quality:
         return EvalResult(
@@ -608,6 +591,10 @@ def coordinate_descent(
     best_params = deepcopy(defaults)
     all_total_time = []
 
+    # Baseline uses full-quality Sonnet; sweep uses cheaper Haiku for relative ranking
+    judge_model_baseline = judge_model
+    judge_model_sweep = config["judge"].get("sweep_model", judge_model)
+
     # Phase 1: Baseline
     print(f"\n  --- Baseline evaluation ---")
     phase = "baseline"
@@ -623,14 +610,15 @@ def coordinate_descent(
                 model=model, infra_config=infra_config, phase="baseline",
                 param_being_optimized="none", params=defaults,
                 eval_prompts=eval_prompts, base_url=base_url,
-                judge_model=judge_model, judge_weights=judge_weights,
+                judge_model=judge_model_baseline, judge_weights=judge_weights,
                 type_weights=type_weights,
                 details_path=details_path, min_tokens_per_sec=min_tps,
             )
         except TpsFailure as e:
             print(f"  Baseline aborted — {e}. Skipping model.")
             return best_params
-        api_call_count[0] += len(eval_prompts)
+        api_call_count[0] += len(eval_prompts)           # inference calls
+        api_call_count[0] += len(eval_prompts)           # judge calls (batched but still N requests)
 
         all_total_time.append(baseline_result.avg_total_time_ms)
         baseline_composite = baseline_result.avg_quality
@@ -706,7 +694,7 @@ def coordinate_descent(
                     model=model, infra_config=infra_config, phase="sweep",
                     param_being_optimized=param_name, params=trial_params,
                     eval_prompts=eval_prompts, base_url=base_url,
-                    judge_model=judge_model, judge_weights=judge_weights,
+                    judge_model=judge_model_sweep, judge_weights=judge_weights,
                     type_weights=type_weights,
                     details_path=details_path, min_tokens_per_sec=min_tps,
                 )
@@ -728,7 +716,8 @@ def coordinate_descent(
                 if param_name == "num_ctx":
                     break  # skip larger ctx values
                 continue
-            api_call_count[0] += len(eval_prompts)
+            api_call_count[0] += len(eval_prompts)       # inference calls
+            api_call_count[0] += len(eval_prompts)       # judge calls
 
             if param_name == "num_ctx":
                 alloc = get_ollama_allocation(ollama_container, load_time)
