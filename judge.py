@@ -152,6 +152,12 @@ def build_judge_prompt(
     return judge_prompt, required_keys
 
 
+# Keys the judge may legitimately omit, with the value the judge instructions specify.
+# context_retention: judge prompt says "For a first turn with no prior context, score this 10"
+# — models sometimes skip the field entirely rather than writing 10.
+_KEY_DEFAULTS: dict[str, float] = {"context_retention": 10.0}
+
+
 def _parse_judge_text(text: str, required_keys: list) -> dict:
     """Parse JSON from a judge response, validate required keys."""
     prefixed = "{" + text.strip()
@@ -162,7 +168,10 @@ def _parse_judge_text(text: str, required_keys: list) -> dict:
     scores = json.loads(prefixed[start:end])
     for key in required_keys:
         if key not in scores:
-            raise ValueError(f"Missing key: {key}")
+            if key in _KEY_DEFAULTS:
+                scores[key] = _KEY_DEFAULTS[key]
+            else:
+                raise ValueError(f"Missing key: {key}")
         if key != "brief_rationale":
             scores[key] = float(scores[key])
     return scores
@@ -232,7 +241,7 @@ def collect_judge_batch(
     items: list[dict],
     model: str,
     timeout_s: float = 300,
-    poll_interval_s: float = 10,
+    poll_interval_s: float = 5,
 ) -> dict[str, dict]:
     """Poll a submitted batch until complete and parse results.
 
@@ -291,7 +300,7 @@ def batch_judge(
     items: list[dict],
     model: str,
     timeout_s: float = 300,
-    poll_interval_s: float = 10,
+    poll_interval_s: float = 5,
 ) -> dict[str, dict]:
     """Submit and collect a judge batch synchronously (convenience wrapper).
 
