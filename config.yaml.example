@@ -35,17 +35,24 @@ eval:
     tool_call: 0.40
     chat: 0.40
 
-# num_ctx includes large values for potential RAG use later; coordinate descent will
-# find the best value and the GPU allocation logging will show VRAM impact.
+# num_ctx is a VRAM capacity constraint, not a quality tradeoff — bigger is always
+# better for chat/RAG use. Binary search finds the max viable ctx per model before
+# any eval runs, so it is excluded from search_space entirely.
+num_ctx_detection:
+  min: 4096
+  max: 32768
+  precision: 1024  # stop when hi-lo <= this; ~4-5 probes per model
+  require_full_gpu: true   # true = max ctx with zero CPU offloading (lowest latency);
+                           # false = max ctx above min_tokens_per_sec floor (more context,
+                           # tolerates some offloading)
+
 search_space:
-  num_ctx: [4096, 8192, 16384, 32768]
   temperature: [0.0, 0.1, 0.3]
-  top_p: [0.9, 1.0]
-  # num_predict dropped: not a meaningful tuning knob — responses are short for
-  # tool_call, and thinking models (qwen3) need uncapped generation budget.
+  # num_ctx removed — handled by binary search above
+  # top_p dropped: Δ<0.1 across all models in prior evals — within noise
   # top_k dropped: Δ0.07–0.11 across all models, within noise
   # repeat_penalty dropped: no measurable sensitivity in results
-  # top_p middle value (0.95) dropped: keep extremes only
+  # num_predict dropped: not a meaningful tuning knob
 
 defaults:
   num_ctx: 8192

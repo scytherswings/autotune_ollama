@@ -904,6 +904,7 @@ def coordinate_descent(
             ctx_min=ctx_cfg.get("min", 4096),
             ctx_max=ctx_cfg.get("max", 32768),
             precision=ctx_cfg.get("precision", 1024),
+            require_full_gpu=ctx_cfg.get("require_full_gpu", True),
         )
         best_params["num_ctx"] = detected_ctx
         defaults = {**defaults, "num_ctx": detected_ctx}

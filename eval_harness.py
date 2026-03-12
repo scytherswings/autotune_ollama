@@ -407,11 +407,40 @@ def check_gpu_fit(model: str, base_url: str) -> bool:
     return True
 
 
-def _ctx_probe(model: str, base_url: str, num_ctx: int, params: dict, min_tps: float) -> bool:
-    """Return True if the model loads and runs above min_tps at num_ctx.
+def _is_fully_in_gpu(model: str, base_url: str) -> bool:
+    """Return True if the model is loaded entirely in GPU VRAM (no CPU offloading).
+
+    Uses Ollama's /api/ps endpoint: size_vram == size means no layers or KV
+    cache have been offloaded to system RAM.
+    """
+    try:
+        resp = requests.get(f"{base_url}/api/ps", timeout=10)
+        resp.raise_for_status()
+        for m in resp.json().get("models", []):
+            if m.get("name", "").startswith(model.split(":")[0]):
+                size = m.get("size", 0)
+                size_vram = m.get("size_vram", 0)
+                return size > 0 and size_vram >= size
+    except requests.RequestException:
+        pass
+    return True  # can't tell — don't block on uncertainty
+
+
+def _ctx_probe(
+    model: str,
+    base_url: str,
+    num_ctx: int,
+    params: dict,
+    min_tps: float,
+    require_full_gpu: bool = False,
+) -> bool:
+    """Return True if the model loads and runs acceptably at num_ctx.
 
     Ollama pre-allocates the full KV cache on load, so any short inference at
     a given num_ctx is a sufficient VRAM test — no need for a long prompt.
+
+    If require_full_gpu is True, also fails if any layers or KV cache are
+    offloaded to system RAM (checked via /api/ps after inference).
     """
     unload_model(model, base_url)  # force reload at new ctx
     probe_params = {**params, "num_ctx": num_ctx, "num_predict": 40}
@@ -422,7 +451,11 @@ def _ctx_probe(model: str, base_url: str, num_ctx: int, params: dict, min_tps: f
             options=probe_params,
             base_url=base_url,
         )
-        return result.tokens_per_sec >= min_tps
+        if result.tokens_per_sec < min_tps:
+            return False
+        if require_full_gpu and not _is_fully_in_gpu(model, base_url):
+            return False
+        return True
     except (OllamaOomError, requests.RequestException):
         return False
 
@@ -435,37 +468,45 @@ def detect_max_ctx(
     ctx_min: int = 4096,
     ctx_max: int = 32768,
     precision: int = 1024,
+    require_full_gpu: bool = False,
 ) -> int:
-    """Binary search for the largest num_ctx that keeps TPS above min_tps.
+    """Binary search for the largest num_ctx that fits within the probe constraints.
 
     Ollama pre-allocates the full KV cache on model load, so a short inference
-    at a given num_ctx is sufficient to detect whether that context size fits
-    in VRAM. Sweeping num_ctx as a quality parameter is wrong — bigger is always
-    better for chat/RAG use, up to the VRAM cliff. This finds that cliff.
+    at a given num_ctx is sufficient to detect whether that context size fits.
+
+    Two modes (controlled by config):
+    - require_full_gpu=False (default): find max ctx where TPS >= min_tps.
+      Tolerates CPU offloading as long as throughput stays acceptable.
+    - require_full_gpu=True: find max ctx where the model fits entirely in GPU
+      VRAM with no layer or KV cache offloading. Gives lowest latency at the
+      cost of smaller context. TPS floor still applies as a secondary check.
 
     Returns the largest passing ctx value (a multiple of precision).
     Falls back to ctx_min if even that value doesn't pass.
     """
     def snap(v: int) -> int:
-        """Round v down to the nearest multiple of precision."""
         return max(ctx_min, (v // precision) * precision)
 
-    print(f"  Detecting max viable num_ctx (binary search {ctx_min}–{ctx_max}, precision {precision})...")
+    mode = "full-GPU" if require_full_gpu else "TPS-floor"
+    print(f"  Detecting max viable num_ctx ({mode}, binary search {ctx_min}–{ctx_max}, precision {precision})...")
+
+    probe = lambda ctx: _ctx_probe(model, base_url, ctx, params, min_tps, require_full_gpu)
 
     # Fast path: max works outright
-    if _ctx_probe(model, base_url, ctx_max, params, min_tps):
+    if probe(ctx_max):
         print(f"  → max ctx {ctx_max} passes — using it")
         return ctx_max
 
-    # Fast path: min fails too — model is unusably slow
-    if not _ctx_probe(model, base_url, ctx_min, params, min_tps):
-        print(f"  → model fails TPS check even at ctx_min={ctx_min}")
-        return ctx_min  # caller / TPS guard will handle this
+    # Fast path: min fails too
+    if not probe(ctx_min):
+        print(f"  → model fails even at ctx_min={ctx_min}")
+        return ctx_min
 
     lo, hi = ctx_min, ctx_max
     while hi - lo > precision:
         mid = snap((lo + hi) // 2)
-        passes = _ctx_probe(model, base_url, mid, params, min_tps)
+        passes = probe(mid)
         print(f"    ctx={mid}: {'pass' if passes else 'FAIL'}")
         if passes:
             lo = mid
