@@ -1,6 +1,6 @@
 {
-  "version": "3.0.0",
-  "description": "Unified eval suite: coding, tool-calling, and business chat (single-turn, 2-turn refinement, 3-turn context stress test).",
+  "version": "4.0.0",
+  "description": "Unified eval suite: coding, tool-calling (scheduling + memory), and business chat. Chat prompts target voice-to-text inputs, hallucination calibration, diplomatic constraint satisfaction, and RAG-style long-context retrieval. Tool-call prompts cover scheduling semantics and memory tool usage (OpenWebUI/Onyx memory integration).",
   "tool_sets": {
     "booking": [
       {
@@ -36,13 +36,7 @@
                 "description": "Optional notes for the therapist"
               }
             },
-            "required": [
-              "client_name",
-              "service_type",
-              "duration_minutes",
-              "date",
-              "time"
-            ]
+            "required": ["client_name", "service_type", "duration_minutes", "date", "time"]
           }
         }
       },
@@ -67,10 +61,7 @@
                 "description": "Optional reason for cancellation"
               }
             },
-            "required": [
-              "client_name",
-              "appointment_date"
-            ]
+            "required": ["client_name", "appointment_date"]
           }
         }
       },
@@ -103,12 +94,7 @@
                 "description": "Optional notes about the change"
               }
             },
-            "required": [
-              "client_name",
-              "original_date",
-              "new_date",
-              "new_time"
-            ]
+            "required": ["client_name", "original_date", "new_date", "new_time"]
           }
         }
       },
@@ -133,11 +119,7 @@
                 "description": "Duration in minutes: 30, 60, or 90"
               }
             },
-            "required": [
-              "date",
-              "time",
-              "duration_minutes"
-            ]
+            "required": ["date", "time", "duration_minutes"]
           }
         }
       },
@@ -162,9 +144,48 @@
                 "description": "End of date range in YYYY-MM-DD format (optional)"
               }
             },
-            "required": [
-              "client_name"
-            ]
+            "required": ["client_name"]
+          }
+        }
+      }
+    ],
+    "memory": [
+      {
+        "type": "function",
+        "function": {
+          "name": "create_memory",
+          "description": "Save important information about the user, their preferences, or their business for future reference. Use when the user shares something they will want remembered across future conversations.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "The information to remember, written as a clear self-contained statement"
+              },
+              "category": {
+                "type": "string",
+                "enum": ["preference", "fact", "contact", "task"],
+                "description": "preference: how the user likes things done; fact: business or operational data; contact: person or vendor info; task: something to follow up on"
+              }
+            },
+            "required": ["content", "category"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "search_memory",
+          "description": "Search previously saved memories for relevant information. Use before answering questions that may have been covered in a prior conversation.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "What to look for in saved memories"
+              }
+            },
+            "required": ["query"]
           }
         }
       }
@@ -204,13 +225,7 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "Book Sarah Chen for a 60-minute deep tissue massage on March 15th at 2:00 PM.",
       "expected_tool": "create_appointment",
-      "required_args": [
-        "client_name",
-        "service_type",
-        "duration_minutes",
-        "date",
-        "time"
-      ],
+      "required_args": ["client_name", "service_type", "duration_minutes", "date", "time"],
       "notes": "Baseline: all args provided explicitly. Tests basic tool invocation and argument mapping."
     },
     {
@@ -218,16 +233,10 @@
       "category": "tool_call",
       "tool_set": "booking",
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
-      "user_message": "Please book Marcus Webb for tomorrow morning at 9 \u2014 something for his sore upper back, half an hour.",
+      "user_message": "Please book Marcus Webb for tomorrow morning at 9 — something for his sore upper back, half an hour.",
       "expected_tool": "create_appointment",
-      "required_args": [
-        "client_name",
-        "service_type",
-        "duration_minutes",
-        "date",
-        "time"
-      ],
-      "notes": "Natural language parsing: relative date (tomorrow=2026-03-12), duration (half an hour=30). Service inference from symptom description \u2014 deep_tissue or sports_massage are both valid. Judge should accept either."
+      "required_args": ["client_name", "service_type", "duration_minutes", "date", "time"],
+      "notes": "Natural language parsing: relative date (tomorrow=2026-03-12), duration (half an hour=30). Service inference from symptom description — deep_tissue or sports_massage are both valid. Judge should accept either."
     },
     {
       "id": "book-informal-service",
@@ -236,26 +245,17 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "Schedule a hot rock session for Jennifer Kim, 90 minutes, March 22nd at 1:00 PM.",
       "expected_tool": "create_appointment",
-      "required_args": [
-        "client_name",
-        "service_type",
-        "duration_minutes",
-        "date",
-        "time"
-      ],
-      "notes": "Service name normalization: 'hot rock session' \u2192 hot_stone. All other args explicit."
+      "required_args": ["client_name", "service_type", "duration_minutes", "date", "time"],
+      "notes": "Service name normalization: 'hot rock session' → hot_stone. All other args explicit."
     },
     {
       "id": "cancel-with-reason",
       "category": "tool_call",
       "tool_set": "booking",
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
-      "user_message": "Please cancel Priya Sharma's appointment on March 18th \u2014 she texted saying she'll be traveling for work.",
+      "user_message": "Please cancel Priya Sharma's appointment on March 18th — she texted saying she'll be traveling for work.",
       "expected_tool": "cancel_appointment",
-      "required_args": [
-        "client_name",
-        "appointment_date"
-      ],
+      "required_args": ["client_name", "appointment_date"],
       "notes": "Tool selection: cancel not create. Model must ignore irrelevant narrative detail (travel reason is optional context, not a required arg)."
     },
     {
@@ -263,15 +263,10 @@
       "category": "tool_call",
       "tool_set": "booking",
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
-      "user_message": "Move Jennifer Kim's March 22nd appointment to the 29th at the same time \u2014 1:00 PM.",
+      "user_message": "Move Jennifer Kim's March 22nd appointment to the 29th at the same time — 1:00 PM.",
       "expected_tool": "reschedule_appointment",
-      "required_args": [
-        "client_name",
-        "original_date",
-        "new_date",
-        "new_time"
-      ],
-      "notes": "All args present. Must use reschedule_appointment \u2014 not cancel+create. Tests whether the model understands the purpose of the reschedule tool vs. decomposing into multiple actions."
+      "required_args": ["client_name", "original_date", "new_date", "new_time"],
+      "notes": "All args present. Must use reschedule_appointment — not cancel+create. Tests whether the model understands the purpose of the reschedule tool vs. decomposing into multiple actions."
     },
     {
       "id": "reschedule-missing-info",
@@ -281,7 +276,7 @@
       "user_message": "Can you reschedule Marcus Webb's appointment to next week?",
       "expected_tool": null,
       "required_args": [],
-      "notes": "Missing: which appointment (original_date) and new time. Model must NOT call reschedule_appointment with guessed/fabricated args \u2014 must ask for the missing details."
+      "notes": "Missing: which appointment (original_date) and new time. Model must NOT call reschedule_appointment with guessed/fabricated args — must ask for the missing details."
     },
     {
       "id": "check-availability-natural",
@@ -290,12 +285,8 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "Is there an opening for a 60-minute session this Friday around 3pm?",
       "expected_tool": "check_availability",
-      "required_args": [
-        "date",
-        "time",
-        "duration_minutes"
-      ],
-      "notes": "Natural date resolution required: 'this Friday' = 2026-03-13. No explicit date provided. Tests check_availability selection over create_appointment (no client name given \u2014 not a booking request)."
+      "required_args": ["date", "time", "duration_minutes"],
+      "notes": "Natural date resolution required: 'this Friday' = 2026-03-13. No explicit date provided. Tests check_availability selection over create_appointment (no client name given — not a booking request)."
     },
     {
       "id": "lookup-client",
@@ -304,10 +295,8 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "What does Sarah Chen have booked for the rest of this week?",
       "expected_tool": "get_client_appointments",
-      "required_args": [
-        "client_name"
-      ],
-      "notes": "Tests get_client_appointments. 'Rest of this week' implies date_from=today, date_to=2026-03-15 (Sunday) \u2014 judge evaluates whether date range is sensible, but only client_name is required."
+      "required_args": ["client_name"],
+      "notes": "Tests get_client_appointments. 'Rest of this week' implies date_from=today, date_to=2026-03-15 (Sunday) — judge evaluates whether date range is sensible, but only client_name is required."
     },
     {
       "id": "wrong-tool-temptation",
@@ -316,10 +305,8 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "Is Jennifer Kim coming in on the 22nd?",
       "expected_tool": "get_client_appointments",
-      "required_args": [
-        "client_name"
-      ],
-      "notes": "Hard semantic trap. 'Is [client] coming in on [date]' = look up existing appointment, NOT check slot availability. check_availability asks whether a slot is free for new bookings \u2014 wrong tool here. Tests whether the model understands tool semantics vs. surface pattern matching."
+      "required_args": ["client_name"],
+      "notes": "Hard semantic trap. 'Is [client] coming in on [date]' = look up existing appointment, NOT check slot availability. check_availability asks whether a slot is free for new bookings — wrong tool here. Tests whether the model understands tool semantics vs. surface pattern matching."
     },
     {
       "id": "ambiguous-check-vs-book",
@@ -328,12 +315,8 @@
       "system_prompt": "You are a scheduling assistant for a wellness center. Today's date is 2026-03-11 (Wednesday). Use the available tools to help with appointment scheduling. If information required to complete a request is missing, ask for it rather than guessing.",
       "user_message": "Marcus Webb wants to know if he can get in for a Swedish massage this Saturday at 10am for an hour.",
       "expected_tool": "check_availability",
-      "required_args": [
-        "date",
-        "time",
-        "duration_minutes"
-      ],
-      "notes": "Intent is to check availability, not book. 'Wants to know if he can get in' \u2260 confirmed booking. Model must not call create_appointment despite having all booking args. 'This Saturday' = 2026-03-14."
+      "required_args": ["date", "time", "duration_minutes"],
+      "notes": "Intent is to check availability, not book. 'Wants to know if he can get in' ≠ confirmed booking. Model must not call create_appointment despite having all booking args. 'This Saturday' = 2026-03-14."
     },
     {
       "id": "no-tool-incomplete-info",
@@ -343,61 +326,106 @@
       "user_message": "I'd like to book an appointment.",
       "expected_tool": null,
       "required_args": [],
-      "notes": "Maximally underspecified booking request. Model must NOT call create_appointment with fabricated args \u2014 must ask for client name, service, date, and time."
+      "notes": "Maximally underspecified booking request. Model must NOT call create_appointment with fabricated args — must ask for client name, service, date, and time."
+    },
+    {
+      "id": "memory-save-explicit",
+      "category": "tool_call",
+      "tool_set": "memory",
+      "system_prompt": "You are an AI assistant for the owner of Serenity Wellness Center. You have access to memory tools to save and retrieve information across conversations. Save important preferences, contacts, and business facts using create_memory when the user shares something worth remembering. Use search_memory when a question may have been covered in a prior conversation.",
+      "user_message": "Hey, can you make a note — I've set up a new vendor for our massage oil and lotion supplies. We're going with Natura Organics going forward. My contact there is Beth Calloway, her email is beth@naturaorganics.com, and they give us net-30 payment terms. I'll need this when we do the next supply order.",
+      "expected_tool": "create_memory",
+      "required_args": ["content", "category"],
+      "notes": "Explicit memory save request. Model must call create_memory with content capturing vendor name (Natura Organics), contact name (Beth Calloway), email (beth@naturaorganics.com), and payment terms (net-30). Category should be 'contact' or 'fact'. Failing mode: model acknowledges the information verbally ('Got it, noted!') without calling create_memory — this defeats the purpose of the memory tool."
+    },
+    {
+      "id": "memory-save-implicit",
+      "category": "tool_call",
+      "tool_set": "memory",
+      "system_prompt": "You are an AI assistant for the owner of Serenity Wellness Center. You have access to memory tools to save and retrieve information across conversations. Save important preferences, contacts, and business facts using create_memory when the user shares something worth remembering. Use search_memory when a question may have been covered in a prior conversation.",
+      "user_message": "Just so you know — whenever I'm working through financial projections I always want conservative numbers. Assume 10 to 15 percent below the optimistic case. I've made decisions based on best-case scenarios before and it's hurt us, so from now on I want plans built around the conservative end.",
+      "expected_tool": "create_memory",
+      "required_args": ["content", "category"],
+      "notes": "Implicit memory save — user states a durable preference without explicitly asking for it to be saved. A capable model recognizes this is a recurring preference worth persisting and calls create_memory (category: preference) before or alongside acknowledging it. A weak model says 'understood' without saving, which means the preference will be lost when the conversation ends. The preference is specific and actionable: use conservative financial projections 10-15% below optimistic case."
     }
   ],
   "chat_prompts": [
     {
-      "id": "chat-meeting-agenda",
+      "id": "chat-vtt-promo",
       "category": "chat",
       "subcategory": "single_turn",
       "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "I need an agenda for a 60-minute staff meeting next Monday. Attendees: me (owner), our two lead therapists (Dana and Rob), our front desk manager (Lisa), and a new practitioner (Keiko, starts this week — her first staff meeting). Main goals: review March booking numbers, decide whether to move forward with adding float therapy as a new service, and make sure Keiko understands how we handle client preferences and rebooking. Create a meeting agenda with time allocations."
+          "content": "okay so I need to put together like a promo email for the clients who haven't been in since like last year um — wait actually make it anyone who hasn't booked in the last ninety days that's probably the right cutoff — and I want to offer them something to come back like a discount maybe ten percent or fifteen I keep going back and forth just pick one that sounds good — and it should feel like a genuine hey we miss you kind of thing not desperate you know but also like we do actually want them to come back and fill up April which has some gaps um — keep it short people do not read long emails like I want it short enough that someone actually reads the whole thing not a newsletter — and professional but warm like how I normally talk not corporate — oh and don't mention any specific services just keep it general"
         }
       ],
-      "notes": "Baseline single-turn. Tests structured agenda generation from a realistic wellness center brief. Good response allocates time sensibly, names agenda items clearly, and doesn't ignore Keiko's onboarding need alongside the float therapy decision."
+      "notes": "Voice-to-text single-turn. User corrects themselves mid-sentence (last year → 90 days), leaves discount amount ambiguous (pick one), states a contradictory framing (not desperate / but needs to fill April), and gives the word limit as an afterthought. Good response: extracts the actual intent, makes a clear discount choice and notes the assumption, stays under 80 words, sounds warm not corporate, does not mention specific services. Failing modes: ignores the word limit, asks for clarification on the discount instead of deciding, produces a corporate-sounding newsletter, blends both discount amounts awkwardly."
     },
     {
-      "id": "chat-action-items",
+      "id": "chat-grounding",
       "category": "chat",
       "subcategory": "single_turn",
       "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Extract all action items from this staff meeting transcript. For each item include: owner, what they need to do, and deadline if mentioned.\n\n---\nOwner: OK, let's wrap up. Lisa, you were going to update the cancellation policy in the booking system?\nLisa: Yes, I'll have that done by end of day Thursday.\nOwner: Great. And Dana — the intake forms for the new deep tissue clients, you said you'd revise those?\nDana: I'll send a draft to the team by Friday for feedback. Want it finalized the following Monday?\nOwner: Yes, Monday the 17th works. Rob, can you put together a list of the equipment we'd need if we add float therapy? Just a rough cost estimate for now.\nRob: Sure, I'll pull that together by next Wednesday.\nOwner: Perfect. I'll reach out to the float tank supplier we met at the trade show — I'll send them an email today asking for a site visit. Lisa, one more thing — can you pull the no-show rate by service type for Q1? I need that before we talk to our accountant on the 20th.\nLisa: I'll have it to you by the 19th.\nOwner: Good. Let's plan to revisit the float therapy decision at the next meeting once Rob and I have the numbers.\n---"
+          "content": "hey quick question I'm putting together our Q2 board summary and I need a few numbers — what's our current client acquisition cost, what's our net promoter score, and what percentage of our revenue is coming from memberships versus one-off visits? just ballpark is fine if you don't have exact numbers"
         }
       ],
-      "notes": "Extraction from a realistic wellness center staff meeting. Tests accurate capture of all 5 action items with correct owners and deadlines. No hallucinated items, no missed items."
+      "notes": "Grounding / calibration test. The model has no access to Serenity's actual business data — client acquisition cost, NPS, and membership revenue split are not in the conversation. The phrase 'just ballpark is fine' is a deliberate trigger: poorly-calibrated models present invented figures as if they are the business's own metrics. Good response: clearly distinguishes between 'your specific numbers' (unavailable) and 'industry context' (acceptable as clearly-framed reference), and tells the owner where to find each metric. CRITICAL DISTINCTION — acceptable: 'I don't have your data; typical wellness center CAC runs $X-Y'; failing: 'Your CAC is around $X' or 'You probably have an NPS of around Y' (presenting unknowns as the specific business's metrics). The judge should reward explicit acknowledgment that these are not the business's own figures, and penalize any response that blurs that line."
     },
     {
-      "id": "chat-client-email",
+      "id": "chat-complaint-response",
       "category": "chat",
-      "subcategory": "single_turn",
+      "subcategory": "two_turn",
       "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Draft a short email to send to our active client list announcing that we're adding a new 30-minute \"Express Recovery\" massage service starting April 1st. Price is $55. It's designed for people with tight schedules — no intake paperwork for returning clients, straight to the table. Key points to hit:\n- New service name and price\n- Who it's for (busy schedules, lunch breaks, quick recovery between workouts)\n- That returning clients can book it right now, new clients need a 5-minute intake first\n- A call to action to book online or call the front desk\n\nKeep it under 150 words. Warm but professional tone — this is going to people who already know us."
+          "content": "I need to think through a client situation. Here's the email we received:\n\n\"Subject: Really disappointed — cancellation charge\n\nHi, I've been coming to Serenity for almost three years and have never had an issue. Last Thursday I had to cancel my 2pm appointment because my daughter had a sudden asthma attack and I had to rush her to urgent care. I called as soon as we arrived at the clinic — about 2.5 hours before my appointment. I understand you have a policy, but this was a genuine medical emergency and I'm really upset that my card was charged $52.50 without any discussion. I spend over $200 at your studio every month and I would appreciate either a refund or a credit toward my next visit. If this isn't resolved I'm going to have to reconsider my membership and leave a review reflecting how this was handled.\n— Margaret H.\"\n\nWalk me through how to think about this. What are the competing considerations here?"
+        },
+        {
+          "role": "user",
+          "content": "OK, we're not issuing the refund — the precedent risk is too high and the policy exists for a reason. But I don't want to lose Margaret and I definitely don't want a one-star review from a three-year client. Write the response email. It needs to feel genuinely human — not a form letter. She should feel heard and respected. Don't be sycophantic, don't cite the policy as justification, and don't offer a refund or monetary credit. But find something real to offer her."
         }
       ],
-      "notes": "Client-facing email drafting. Tests tone calibration (warm, not corporate), brevity, and whether all 4 required points make it in under the word limit. Good response won't add filler or invent details not in the brief."
+      "notes": "2-turn diplomatic constraint satisfaction. Turn 1 tests analytical framing of competing priorities. Turn 2 tests hard constraint satisfaction in professional writing: (1) no refund or monetary credit — hard constraint, (2) warm and genuine — not a form letter, (3) not defensive or policy-citing, (4) not sycophantic, (5) offers something real (e.g., complimentary add-on at next visit, a personal note from the owner, priority rebooking). Failing modes: offers a refund or credit despite Turn 2 instruction, produces a corporate form response, opens with sycophantic praise of the client, lectures Margaret about the policy, or offers nothing concrete."
     },
     {
-      "id": "chat-business-summary",
+      "id": "chat-vtt-pivot",
       "category": "chat",
-      "subcategory": "single_turn",
+      "subcategory": "two_turn",
       "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "I'm meeting with a local bank next week to discuss a small business loan for a second location. Turn these raw notes into a polished one-page business summary (max 200 words) I can leave with them. The audience is a bank loan officer — they care about financial stability, growth trajectory, and risk.\n\nRaw notes:\n- opened 2021, profitable since month 14\n- current location: 6 treatment rooms, 8 practitioners (3 full-time, 5 part-time)\n- 2025 revenue: $680K, up 22% from 2024\n- avg monthly bookings: 1,100, running at 84% capacity for the past 6 months\n- no-show rate: 8% (industry avg is ~15%)\n- client retention: 71% of clients rebook within 60 days\n- asking for: $180K loan to fit out a second location, 12-month timeline to open\n- second location identified: retail space in Riverside district, 8 rooms, lease terms favorable\n- risk: depends on hiring 4 new practitioners before opening; local talent market is competitive"
+          "content": "Draft a brief internal memo to all staff announcing that we're raising deep tissue and hot stone service prices by ten dollars across all session lengths, effective April 1st. The reason is increased supply costs and a therapist compensation adjustment. Keep it informational and professional — staff-facing only, not client-facing."
+        },
+        {
+          "role": "user",
+          "content": "actually wait hold on um forget that pricing memo — the whole price increase is getting pushed to Q2 we decided to wait so just scrap that entirely — what I actually need right now is a staff meeting reminder for Monday um it's at nine am in the break room attendance is required not optional — main topics are Q1 financials review and then the float therapy discussion — for the float therapy part I want the reminder to sound genuinely excited because we are we think this could be a real opportunity for us — keep it short enough to drop in the staff Slack channel people aren't going to read a wall of text — oh and just to be super clear do not include anything about pricing in this that's a completely separate thing now okay"
         }
       ],
-      "notes": "Synthesis for a specific audience. Tests ability to frame raw operational data as a financial narrative for a bank. Good response leads with strength (profitability, growth, capacity utilization) and addresses risk honestly without burying it."
+      "notes": "2-turn voice-to-text pivot. Turn 2 is a VTT message that completely abandons Turn 1 and requests something entirely different. Tests whether the model: (1) fully discards the pricing memo content — zero pricing references allowed, (2) correctly produces a meeting reminder for Monday 9am, break room, required attendance, (3) captures the 'genuinely excited' framing instruction for the float therapy item despite it being buried in rambling VTT, (4) applies a professional memo tone. Failing modes: bleeds pricing content into the reminder, misses the excitement framing for float therapy, treats attendance as optional, or loses track of which task was requested."
+    },
+    {
+      "id": "chat-rag-retrieval",
+      "category": "chat",
+      "subcategory": "two_turn",
+      "system_prompt": "You are a business advisor for the owner of Serenity Wellness Center. Answer questions accurately using the operations reference below. For specific facts, contacts, and figures, use only what is in the reference — if something is not listed, say so clearly rather than estimating.\n\n[OPERATIONS REFERENCE]\n\nSERENITY WELLNESS CENTER — STAFF OPERATIONS REFERENCE\nUpdated: January 2026\n\nSTAFF DIRECTORY\n\nDana Wells | Senior LMT | Full-time, Mon–Thu\nSpecialties: deep tissue, sports massage, prenatal massage. Certifications: LMT, Prenatal Massage Certification (PMC), Myofascial Release Level 2. Primary room: Room 2. Dana mentors new practitioners. Her Tuesday morning slots (9–11am) are reserved for three long-term clients (Elena R., Paul M., and Gwen T.) — do not reschedule without her approval.\n\nRob Kim | Senior LMT | Full-time, Mon–Fri\nSpecialties: hot stone, Swedish, reflexology. Certifications: LMT, Hot Stone Therapy Certification, Reflexology Practitioner Certificate. Primary room: Room 1. [CONFIDENTIAL: Rob has given notice and will leave in June 2026 to open his own practice. This is not yet disclosed to staff or clients. Do not reference in any client-facing communications.]\n\nKeiko Tanaka | LMT | Part-time, Tue/Wed/Fri\nSpecialties: Swedish massage, facial treatments. Certifications: LMT, WA State Esthetics License. Start date: March 10, 2026. During her first 60 days, Keiko may not be booked for deep tissue, sports massage, or hot stone services. Assign to Rooms 5 or 6 when possible.\n\nMarcus Webb | LMT | Part-time, Sat–Sun only\nSpecialties: sports massage, deep tissue. Certifications: LMT, Certified Sports Massage Therapist (CSMT). Available 9am–5pm weekends only.\n\nPriya Sharma | LMT | Part-time, Mon/Wed/Thu\nSpecialties: Swedish, hot stone, prenatal massage. Certifications: LMT, Prenatal Massage Certification (PMC).\n\nLisa Park | Front Desk Manager | Full-time, Mon–Sat\nManages: scheduling, client intake, payment processing, supply ordering, client communications. Vagaro administrator access. Primary contact for all vendor inquiries.\n\nTREATMENT ROOMS\nRoom 1: Massage (Rob Kim primary)\nRoom 2: Massage (Dana Wells primary)\nRoom 3: Massage (overflow/general)\nRoom 4: Prenatal-equipped (hydraulic table, positioning bolsters) — required for all prenatal services\nRoom 5: Multi-purpose — currently facial treatments; reserved for float tank conversion if approved\nRoom 6: Multi-purpose — currently facial treatments; reserved for float tank conversion if approved\n\nHOURS\nMonday–Saturday: 9:00 AM–7:00 PM (last appointment slot: 6:00 PM)\nSunday: 10:00 AM–5:00 PM (last appointment slot: 4:00 PM)\n\nSERVICE MENU AND PRICING\nSwedish Massage: 60 min $95 / 90 min $135\nDeep Tissue Massage: 60 min $105 / 90 min $145\nHot Stone Massage: 60 min $115 / 90 min $155\nSports Massage: 60 min $100 / 90 min $140\nPrenatal Massage: 60 min $95 (no 90-min option; Room 4 required)\nFacial — Standard: 60 min $85\nFacial — Premium (includes microdermabrasion): 75 min $110\nExpress Recovery Massage: 30 min $55 (returning clients only; new clients require a 5-min intake first)\n\nMEMBERSHIP PROGRAM\nMonthly fee: $89/month (auto-renewing)\nBenefits: 15% discount on all services, priority booking (24-hour early access before general availability), one guest pass per quarter\nCancellation: 30-day written notice required. No mid-cycle proration.\nActive members: 47\n\nCANCELLATION AND NO-SHOW POLICY\nRequired advance notice: 24 hours for fee-free cancellation\nLate cancellation (under 24 hours): 50% of service fee charged to card on file\nNo-show (no contact before appointment time): 100% of service fee charged\nExceptions:\n  — First-time clients: waive late cancellation fee once as a goodwill gesture\n  — Medical emergencies: use judgment; document every exception in Vagaro with the reason and name of approving staff member\n  — Repeat offenders (3 or more late cancellations within 12 months): require prepayment at booking; no further exceptions\n\nGIFT CARDS\nValid 12 months from date of purchase. Non-refundable. Transferable to another client. Lost cards reissued if original purchaser provides purchase date and amount.\n\nREFERRAL PROGRAM\n$15 account credit to referrer when referred client completes their first full-price service. Credits do not expire. Not applicable toward membership fees.\n\nEMERGENCY AND VENDOR CONTACTS\nMedical emergency: Call 911 immediately, then notify owner at 206-555-0293.\nBuilding maintenance emergency (after hours): Tom Reeves (building manager), 206-555-0147.\nEquipment repair (tables, HVAC, linen infrastructure): Wellness Equipment Services, 206-555-0382. Business hours only — leave voicemail after hours, they respond next business morning.\nLinen supplier: Pacific Linen Services, account number PL-4471. Contact: Rodrigo Vega, rodrigo@pacificlinen.com.\n\nFLOAT THERAPY (PROPOSED — NOT YET APPROVED)\nRooms 5 and 6 would convert to float tanks (Zen Float Co. partnership). Price: $95/session, available in 60 or 90 min. Capital investment: $95K. Projected payback: 18–24 months at target utilization. Each session requires a 10-minute orientation by certified staff. Decision pending Q2 2026 planning meeting.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Quick question before this morning's bookings — Keiko is on the schedule for later today. She started with us ten days ago. What can and can't she be booked for right now, and which rooms should she be in?"
+        },
+        {
+          "role": "user",
+          "content": "okay also um Lisa called in sick today which is terrible timing because our linen delivery is tomorrow — who do I contact for that and what's our account number so I can handle it directly? Oh and while I have you — a member just texted asking about the premium facial, what does she pay after her discount and how long is that service?"
+        }
+      ],
+      "notes": "RAG-proxy retrieval test. System prompt contains a dense operations reference (~900 tokens) simulating an Onyx/OpenWebUI document injection. Tests precise recall of specific facts from different sections of the document under realistic context load. Turn 1 requires: Keiko restriction (no deep tissue, sports, or hot stone during first 60 days) + room assignment (Rooms 5 or 6). Turn 2 voice-to-text requires: linen contact (Rodrigo Vega, rodrigo@pacificlinen.com, account PL-4471) + member premium facial price ($110 × 0.85 = $93.50) + duration (75 min). All answers are in the reference — a model hallucinating or estimating any of these specific details (contact name, email, account number, prices, durations) should score lower. Good response cites specific values without hedging; does not invent or estimate."
     },
     {
       "id": "chat-agenda-refine",
@@ -415,23 +443,6 @@
         }
       ],
       "notes": "2-turn restructure. Turn 2 tests whether the model genuinely reorders the agenda (financials and budget items first, float therapy and staffing after) rather than just appending a note. Total must still be 75 minutes."
-    },
-    {
-      "id": "chat-policy-rewrite",
-      "category": "chat",
-      "subcategory": "two_turn",
-      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
-      "turns": [
-        {
-          "role": "user",
-          "content": "Write a clear internal policy document for our staff on how to handle late cancellations and no-shows. Our policy: clients must cancel at least 24 hours in advance. Late cancellations (under 24 hours) are charged 50% of the service fee. No-shows are charged 100%. First-time clients and medical emergencies are exceptions — use judgment. Staff should log every exception in the booking system with a reason."
-        },
-        {
-          "role": "user",
-          "content": "Good. Now rewrite that as a short client-facing version for our website FAQ. Same policy, but the tone should be warm and reassuring — we want clients to feel respected, not threatened. No staff instructions, no mention of logging. Keep it under 100 words."
-        }
-      ],
-      "notes": "2-turn audience shift from internal staff policy to client-facing FAQ. Turn 2 tests genuine rewriting: removes staff-specific instructions, shifts tone from procedural to reassuring, hits the word limit. A weak response just lightly edits the Turn 1 text."
     },
     {
       "id": "chat-expansion-stress",

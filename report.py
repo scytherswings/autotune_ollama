@@ -33,6 +33,24 @@ def model_ranking(data):
     return [(name, sum(qs) / len(qs), len(qs)) for name, qs in ranked]
 
 
+def category_ranking(data):
+    """Per-category (prompt_type) model ranking."""
+    # {category: {model: [quality scores]}}
+    cats = defaultdict(lambda: defaultdict(list))
+    for r in data:
+        pt = r.get("prompt_type")
+        if pt:
+            cats[pt][r["model"]].append(r["quality"])
+    result = {}
+    for cat, models in cats.items():
+        ranked = sorted(
+            ((sum(v) / len(v), name, len(v)) for name, v in models.items()),
+            reverse=True,
+        )
+        result[cat] = ranked
+    return result
+
+
 def best_overall_config(data, min_samples=4):
     configs = defaultdict(list)
     for r in data:
@@ -126,11 +144,13 @@ def main():
     failures = failure_summary(data)
     model_params, model_phases = completed_models(data)
 
+    cat_ranked = category_ranking(data)
+
     print(f"\n{'=' * 60}")
     print(f"  autotune-ollama findings  ({n} eval records)")
     print(f"{'=' * 60}\n")
 
-    # --- Model ranking ---
+    # --- Overall model ranking ---
     print("MODEL RANKING (avg quality across all evals)")
     print("-" * 50)
     for name, avg, count in models_ranked:
@@ -138,6 +158,19 @@ def main():
         status = "sweep done" if len(swept) >= 4 else f"swept: {', '.join(swept) or 'none'}"
         print(f"  {bar(avg)}  n={count:<4}  {name}")
         print(f"  {'':18}         {status}")
+    print()
+
+    # --- Per-category rankings ---
+    cat_order = ["chat", "tool_call", "coding"]
+    cat_labels = {"chat": "CHAT", "tool_call": "TOOL CALLING", "coding": "CODING"}
+    for cat in cat_order:
+        if cat not in cat_ranked:
+            continue
+        print(f"CATEGORY: {cat_labels[cat]}")
+        print("-" * 50)
+        for avg, name, count in cat_ranked[cat]:
+            print(f"  {bar(avg)}  n={count:<4}  {name}")
+        print()
     print()
 
     # --- Best config ---

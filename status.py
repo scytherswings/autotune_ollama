@@ -18,12 +18,15 @@ def load_data():
 
 
 def model_summary(data):
-    """Per-model record counts, avg quality, and phase breakdown."""
-    models = defaultdict(lambda: {"quality": [], "phases": defaultdict(int)})
+    """Per-model record counts, avg quality, phase breakdown, and per-category scores."""
+    models = defaultdict(lambda: {"quality": [], "phases": defaultdict(int), "by_type": defaultdict(list)})
     for r in data:
         m = models[r["model"]]
         m["quality"].append(r["quality"])
         m["phases"][r["phase"]] += 1
+        pt = r.get("prompt_type")
+        if pt:
+            m["by_type"][pt].append(r["quality"])
     return models
 
 
@@ -95,7 +98,15 @@ def main():
     model_rows.sort(reverse=True)
     for avg, name, n, phases in model_rows:
         bar = print_bar(avg)
+        m = models[name]
+        type_parts = []
+        for cat in ("chat", "tool_call", "coding"):
+            scores = m["by_type"].get(cat, [])
+            if scores:
+                type_parts.append(f"{cat}={sum(scores)/len(scores):.2f}")
+        type_str = "  ".join(type_parts) if type_parts else "no category data"
         print(f"  {bar}  n={n:<4}  {name}")
+        print(f"           {'':20}         {type_str}")
         print(f"           {'':20}         phases: {phases}")
     print()
 

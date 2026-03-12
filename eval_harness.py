@@ -407,8 +407,86 @@ def check_gpu_fit(model: str, base_url: str) -> bool:
     return True
 
 
-def warmup(model: str, base_url: str) -> None:
-    """Send a throwaway prompt to warm up the model before timing."""
+def _ctx_probe(model: str, base_url: str, num_ctx: int, params: dict, min_tps: float) -> bool:
+    """Return True if the model loads and runs above min_tps at num_ctx.
+
+    Ollama pre-allocates the full KV cache on load, so any short inference at
+    a given num_ctx is a sufficient VRAM test — no need for a long prompt.
+    """
+    unload_model(model, base_url)  # force reload at new ctx
+    probe_params = {**params, "num_ctx": num_ctx, "num_predict": 40}
+    try:
+        result = run_inference(
+            model=model,
+            prompt="List three benefits of regular massage therapy.",
+            options=probe_params,
+            base_url=base_url,
+        )
+        return result.tokens_per_sec >= min_tps
+    except (OllamaOomError, requests.RequestException):
+        return False
+
+
+def detect_max_ctx(
+    model: str,
+    base_url: str,
+    params: dict,
+    min_tps: float = 0,
+    ctx_min: int = 4096,
+    ctx_max: int = 32768,
+    precision: int = 1024,
+) -> int:
+    """Binary search for the largest num_ctx that keeps TPS above min_tps.
+
+    Ollama pre-allocates the full KV cache on model load, so a short inference
+    at a given num_ctx is sufficient to detect whether that context size fits
+    in VRAM. Sweeping num_ctx as a quality parameter is wrong — bigger is always
+    better for chat/RAG use, up to the VRAM cliff. This finds that cliff.
+
+    Returns the largest passing ctx value (a multiple of precision).
+    Falls back to ctx_min if even that value doesn't pass.
+    """
+    def snap(v: int) -> int:
+        """Round v down to the nearest multiple of precision."""
+        return max(ctx_min, (v // precision) * precision)
+
+    print(f"  Detecting max viable num_ctx (binary search {ctx_min}–{ctx_max}, precision {precision})...")
+
+    # Fast path: max works outright
+    if _ctx_probe(model, base_url, ctx_max, params, min_tps):
+        print(f"  → max ctx {ctx_max} passes — using it")
+        return ctx_max
+
+    # Fast path: min fails too — model is unusably slow
+    if not _ctx_probe(model, base_url, ctx_min, params, min_tps):
+        print(f"  → model fails TPS check even at ctx_min={ctx_min}")
+        return ctx_min  # caller / TPS guard will handle this
+
+    lo, hi = ctx_min, ctx_max
+    while hi - lo > precision:
+        mid = snap((lo + hi) // 2)
+        passes = _ctx_probe(model, base_url, mid, params, min_tps)
+        print(f"    ctx={mid}: {'pass' if passes else 'FAIL'}")
+        if passes:
+            lo = mid
+        else:
+            hi = mid
+
+    print(f"  → max viable num_ctx: {lo}")
+    return lo
+
+
+def warmup(model: str, base_url: str, options: dict | None = None) -> None:
+    """Send a throwaway prompt to warm up the model before timing.
+
+    Pass the same options (especially num_ctx) that the eval will use so Ollama
+    loads the model at the correct context size. Without this, the first real eval
+    prompt triggers a reload if its num_ctx differs from Ollama's default.
+    """
+    opts = {"num_predict": 10}
+    if options:
+        opts.update({k: v for k, v in options.items() if k != "num_predict"})
+        opts["num_predict"] = 10
     try:
         requests.post(
             f"{base_url}/api/chat",
@@ -416,7 +494,7 @@ def warmup(model: str, base_url: str) -> None:
                 "model": model,
                 "messages": [{"role": "user", "content": "Say hello."}],
                 "stream": False,
-                "options": {"num_predict": 10},
+                "options": opts,
             },
             timeout=60,
         )

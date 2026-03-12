@@ -1,8 +1,10 @@
 """Main orchestration loop: coordinate descent parameter optimization for Ollama models."""
 
+import atexit
 import csv
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -22,6 +24,7 @@ from eval_harness import (
     OllamaOomError,
     check_gpu_fit,
     check_objective_criteria,
+    detect_max_ctx,
     get_ollama_allocation,
     unload_model,
     ollama_url,
@@ -61,10 +64,23 @@ TSV_COLUMNS = [
     "objective_score",
     "judge_score",
     "quality_score",
+    "chat_score",
+    "tool_call_score",
+    "coding_score",
     "composite_score",
     "is_best",
     "notes",
 ]
+
+
+def _type_scores(quality_by_type: dict) -> dict:
+    """Return chat/tool_call/coding score fields for a TSV row."""
+    fmt = lambda v: f"{v:.2f}" if v is not None else ""
+    return {
+        "chat_score": fmt(quality_by_type.get("chat")),
+        "tool_call_score": fmt(quality_by_type.get("tool_call")),
+        "coding_score": fmt(quality_by_type.get("coding")),
+    }
 
 
 class TpsFailure(Exception):
@@ -874,6 +890,24 @@ def coordinate_descent(
     best_params = deepcopy(defaults)
     all_total_time = []
 
+    # Detect max viable num_ctx via binary search before running any evals.
+    # num_ctx is a VRAM capacity constraint, not a quality tradeoff — bigger is
+    # always better for chat/RAG use, up to the point where the KV cache no
+    # longer fits in GPU VRAM and TPS falls below the floor.
+    ctx_cfg = config.get("num_ctx_detection", {})
+    if ctx_cfg:
+        detected_ctx = detect_max_ctx(
+            model=model,
+            base_url=base_url,
+            params=defaults,
+            min_tps=min_tps,
+            ctx_min=ctx_cfg.get("min", 4096),
+            ctx_max=ctx_cfg.get("max", 32768),
+            precision=ctx_cfg.get("precision", 1024),
+        )
+        best_params["num_ctx"] = detected_ctx
+        defaults = {**defaults, "num_ctx": detected_ctx}
+
     # Baseline uses full-quality Sonnet; sweep uses cheaper Haiku for relative ranking
     judge_model_baseline = judge_model
     judge_model_sweep = config["judge"].get("sweep_model", judge_model)
@@ -926,6 +960,7 @@ def coordinate_descent(
             "objective_score": f"{baseline_result.avg_objective_score:.2f}",
             "judge_score": f"{baseline_result.avg_judge_score:.2f}",
             "quality_score": f"{baseline_result.avg_quality:.2f}",
+            **_type_scores(baseline_result.quality_by_type),
             "composite_score": f"{baseline_composite:.2f}",
             "is_best": "true",
             "notes": f"baseline {type_notes}",
@@ -1004,7 +1039,7 @@ def coordinate_descent(
                     **{p: trial_params[p] for p in param_order},
                     "tokens_per_sec": "0", "ttft_ms": "0", "total_time_ms": "0",
                     "objective_score": "0", "judge_score": "0",
-                    "quality_score": "0", "composite_score": "0",
+                    "quality_score": "0", **_type_scores({}), "composite_score": "0",
                     "is_best": "false", "notes": label,
                 })
                 completed.add(key)
@@ -1086,6 +1121,7 @@ def coordinate_descent(
                 "objective_score": f"{result.avg_objective_score:.2f}",
                 "judge_score": f"{result.avg_judge_score:.2f}",
                 "quality_score": f"{result.avg_quality:.2f}",
+                **_type_scores(result.quality_by_type),
                 "composite_score": f"{composite:.2f}",
                 "is_best": str(is_best).lower(),
                 "notes": type_notes,
@@ -1116,7 +1152,9 @@ def coordinate_descent(
         "phase": "complete", "param_being_optimized": "none",
         **{p: best_params[p] for p in param_order},
         "tokens_per_sec": "", "ttft_ms": "", "total_time_ms": "", "objective_score": "",
-        "judge_score": "", "quality_score": "", "composite_score": "",
+        "judge_score": "", "quality_score": "",
+        "chat_score": "", "tool_call_score": "", "coding_score": "",
+        "composite_score": "",
         "is_best": "", "notes": "sweep_complete",
     })
 
@@ -1207,6 +1245,37 @@ def validate_config(config: dict) -> None:
         sys.exit(1)
 
 
+# Populated by main() once config is loaded; used by the shutdown handler.
+_ollama_shutdown_args: dict | None = None
+_ollama_stopped = False
+
+
+def _stop_ollama() -> None:
+    """Stop the Ollama Docker container. Safe to call multiple times."""
+    global _ollama_stopped
+    if _ollama_stopped or _ollama_shutdown_args is None:
+        return
+    _ollama_stopped = True
+    args = _ollama_shutdown_args
+    compose_file = Path(args["compose_dir"]) / f"docker-compose.{args['last_infra']}.yml"
+    env = os.environ.copy()
+    env["OLLAMA_VOLUME"] = args["ollama_volume"]
+    result = subprocess.run(
+        ["docker", "compose", "-p", args["compose_project"], "-f", str(compose_file), "down"],
+        capture_output=True, text=True, env=env,
+    )
+    if result.returncode == 0:
+        print("  Ollama container stopped.")
+    else:
+        print(f"  WARNING: could not stop Ollama container: {result.stderr.strip()}")
+
+
+def _sigterm_handler(signum, frame):
+    print("\n  Caught signal — stopping Ollama and exiting.")
+    _stop_ollama()
+    sys.exit(0)
+
+
 def main():
     config = load_config()
     validate_config(config)
@@ -1214,6 +1283,8 @@ def main():
     tsv_path = "results.tsv"
     details_path = "details.jsonl"
     init_tsv(tsv_path)
+    # Touch details.jsonl so it exists immediately for `tail -f` watchers
+    Path(details_path).touch(exist_ok=True)
 
     infra = config["infra"]
     base_url = ollama_url(infra["ollama_host"], infra["ollama_port"])
@@ -1222,6 +1293,17 @@ def main():
     ollama_volume = infra["ollama_volume"]
     models = config["models"]
     infra_configs = config["infra_configs"]
+
+    # Register shutdown handler now that we have config — fires on exit, exception, or signal
+    global _ollama_shutdown_args
+    _ollama_shutdown_args = {
+        "compose_dir": compose_dir,
+        "compose_project": compose_project,
+        "ollama_volume": ollama_volume,
+        "last_infra": infra_configs[-1] if infra_configs else None,
+    }
+    atexit.register(_stop_ollama)
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     preflight_check(config)
 
@@ -1283,7 +1365,7 @@ def main():
                 print(f"  SKIPPING model {model}: does not fit in GPU")
                 continue
 
-            warmup(model, base_url)
+            warmup(model, base_url, options=config["defaults"])
 
             best_params = coordinate_descent(
                 model=model,
@@ -1313,20 +1395,7 @@ def main():
     print(f"  Results: {tsv_path}")
     print(f"{'='*60}")
 
-    # Stop the Ollama container — leave GPU memory free after the run
-    last_infra = infra_configs[-1] if infra_configs else None
-    if last_infra:
-        compose_file = Path(compose_dir) / f"docker-compose.{last_infra}.yml"
-        env = os.environ.copy()
-        env["OLLAMA_VOLUME"] = ollama_volume
-        result = subprocess.run(
-            ["docker", "compose", "-p", compose_project, "-f", str(compose_file), "down"],
-            capture_output=True, text=True, env=env,
-        )
-        if result.returncode == 0:
-            print("  Ollama container stopped.")
-        else:
-            print(f"  WARNING: could not stop Ollama container: {result.stderr.strip()}")
+    _stop_ollama()
 
 
 if __name__ == "__main__":
