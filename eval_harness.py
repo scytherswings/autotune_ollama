@@ -53,6 +53,7 @@ class ToolCallResult:
     response_text: str        # any text the model produced alongside tool calls
     tokens_per_sec: float
     ttft_ms: float
+    total_duration_ns: int    # wall-clock time from request to last token (ns)
     eval_count: int
     used_native_tools: bool   # True = Ollama tools param worked; False = text fallback
 
@@ -226,6 +227,7 @@ def run_tool_inference(
     tool_calls = []
     eval_count = 0
     eval_duration_ns = 0
+    total_duration_ns = 0
 
     resp = requests.post(
         f"{base_url}/api/chat",
@@ -256,6 +258,7 @@ def run_tool_inference(
         if data.get("done", False):
             eval_count = data.get("eval_count", 0)
             eval_duration_ns = data.get("eval_duration", 0)
+            total_duration_ns = data.get("total_duration", 0)
             if msg.get("tool_calls"):
                 tool_calls = msg["tool_calls"]
         else:
@@ -281,6 +284,7 @@ def run_tool_inference(
         response_text=raw_text,
         tokens_per_sec=tokens_per_sec,
         ttft_ms=ttft_ms,
+        total_duration_ns=total_duration_ns,
         eval_count=eval_count,
         used_native_tools=used_native,
     )

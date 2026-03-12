@@ -49,6 +49,7 @@ TSV_COLUMNS = [
     "num_predict",
     "tokens_per_sec",
     "ttft_ms",
+    "total_time_ms",
     "objective_score",
     "judge_score",
     "quality_score",
@@ -70,6 +71,7 @@ class EvalResult:
     avg_judge_score: float
     avg_tokens_per_sec: float
     avg_ttft_ms: float
+    avg_total_time_ms: float     # wall-clock time per prompt (includes thinking for qwen3 etc.)
     per_prompt: list
     quality_by_type: dict = field(default_factory=dict)  # {"coding": float, "tool_call": float}
     failed_count: int = 0
@@ -330,6 +332,7 @@ def evaluate_params(
     all_judge_scores: list[float] = []
     tps_values: list[float] = []
     ttft_values: list[float] = []
+    total_time_values: list[float] = []
     per_prompt = []
     failed_count = 0
 
@@ -350,6 +353,7 @@ def evaluate_params(
                 tool_calls = []
                 tps = result.tokens_per_sec
                 ttft = result.ttft_ms
+                total_time = result.total_duration_ns / 1_000_000
                 used_native = False
 
             elif prompt_type == "tool_call":
@@ -365,6 +369,7 @@ def evaluate_params(
                 tool_calls = result.tool_calls
                 tps = result.tokens_per_sec
                 ttft = result.ttft_ms
+                total_time = result.total_duration_ns / 1_000_000
                 used_native = result.used_native_tools
 
             else:
@@ -432,6 +437,7 @@ def evaluate_params(
         all_judge_scores.append(judge_score)
         tps_values.append(tps)
         ttft_values.append(ttft)
+        total_time_values.append(total_time)
 
         per_prompt.append({
             "id": prompt_id,
@@ -458,7 +464,7 @@ def evaluate_params(
     if not per_type_quality:
         return EvalResult(
             avg_quality=0, avg_objective_score=0, avg_judge_score=0,
-            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"),
+            avg_tokens_per_sec=0, avg_ttft_ms=float("inf"), avg_total_time_ms=float("inf"),
             per_prompt=per_prompt, quality_by_type={}, failed_count=failed_count,
         )
 
@@ -489,6 +495,7 @@ def evaluate_params(
         avg_judge_score=round(avg_judge, 4),
         avg_tokens_per_sec=sum(tps_values) / len(tps_values),
         avg_ttft_ms=sum(ttft_values) / len(ttft_values),
+        avg_total_time_ms=sum(total_time_values) / len(total_time_values),
         per_prompt=per_prompt,
         quality_by_type=quality_by_type,
         failed_count=failed_count,
@@ -497,27 +504,25 @@ def evaluate_params(
 
 def compute_composite(
     quality: float,
-    tps: float,
-    ttft: float,
-    tps_range: tuple[float, float],
-    ttft_range: tuple[float, float],
+    total_time_ms: float,
+    total_time_range: tuple[float, float],
     weights: dict,
 ) -> float:
-    """Compute composite score with min-max normalization for speed metrics."""
-    tps_min, tps_max = tps_range
-    tps_norm = (tps - tps_min) / (tps_max - tps_min) if tps_max > tps_min else 0.5
+    """Compute composite score: quality + latency (total wall-clock time per prompt).
 
-    ttft_min, ttft_max = ttft_range
-    ttft_norm = 1.0 - (ttft - ttft_min) / (ttft_max - ttft_min) if ttft_max > ttft_min else 0.5
-
-    tps_norm = max(0, min(1, tps_norm))
-    ttft_norm = max(0, min(1, ttft_norm))
+    total_time_ms captures the full cost — thinking time, generation, and prompt
+    eval — making it the right signal for thinking models like qwen3 where TTFT
+    and TPS individually look fine but total time can be 10× longer.
+    """
+    t_min, t_max = total_time_range
+    # Lower total_time is better, so invert: best time → 1.0, worst → 0.0
+    latency_norm = 1.0 - (total_time_ms - t_min) / (t_max - t_min) if t_max > t_min else 0.5
+    latency_norm = max(0, min(1, latency_norm))
     quality_norm = (quality - 1) / 9
 
     composite = (
         quality_norm * weights["quality_weight"]
-        + tps_norm * weights["speed_weight"]
-        + ttft_norm * weights["ttft_weight"]
+        + latency_norm * weights["latency_weight"]
     )
     return composite * 10
 
@@ -550,8 +555,7 @@ def coordinate_descent(
     param_order = list(defaults.keys())
 
     best_params = deepcopy(defaults)
-    all_tps = []
-    all_ttft = []
+    all_total_time = []
 
     # Phase 1: Baseline
     print(f"\n  --- Baseline evaluation ---")
@@ -577,8 +581,7 @@ def coordinate_descent(
             return best_params
         api_call_count[0] += len(eval_prompts)
 
-        all_tps.append(baseline_result.avg_tokens_per_sec)
-        all_ttft.append(baseline_result.avg_ttft_ms)
+        all_total_time.append(baseline_result.avg_total_time_ms)
         baseline_composite = baseline_result.avg_quality
 
         type_notes = " ".join(f"{t}={v:.2f}" for t, v in sorted(baseline_result.quality_by_type.items()))
@@ -590,6 +593,7 @@ def coordinate_descent(
             "param_being_optimized": "none",
             "tokens_per_sec": f"{baseline_result.avg_tokens_per_sec:.2f}",
             "ttft_ms": f"{baseline_result.avg_ttft_ms:.0f}",
+            "total_time_ms": f"{baseline_result.avg_total_time_ms:.0f}",
             "objective_score": f"{baseline_result.avg_objective_score:.2f}",
             "judge_score": f"{baseline_result.avg_judge_score:.2f}",
             "quality_score": f"{baseline_result.avg_quality:.2f}",
@@ -605,10 +609,9 @@ def coordinate_descent(
         baseline_composite = 5.0
         baseline_result = EvalResult(
             avg_quality=5.0, avg_objective_score=0.5, avg_judge_score=5.0,
-            avg_tokens_per_sec=30.0, avg_ttft_ms=500.0, per_prompt=[],
+            avg_tokens_per_sec=30.0, avg_ttft_ms=500.0, avg_total_time_ms=30000.0, per_prompt=[],
         )
-        all_tps.append(baseline_result.avg_tokens_per_sec)
-        all_ttft.append(baseline_result.avg_ttft_ms)
+        all_total_time.append(baseline_result.avg_total_time_ms)
 
     best_composite = baseline_composite
 
@@ -664,7 +667,7 @@ def coordinate_descent(
                     "infra_config": infra_config, "model": model,
                     "phase": phase, "param_being_optimized": param_name,
                     **{p: trial_params[p] for p in param_order},
-                    "tokens_per_sec": "0", "ttft_ms": "0",
+                    "tokens_per_sec": "0", "ttft_ms": "0", "total_time_ms": "0",
                     "objective_score": "0", "judge_score": "0",
                     "quality_score": "0", "composite_score": "0",
                     "is_best": "false", "notes": label,
@@ -689,14 +692,12 @@ def coordinate_descent(
                 # Generic (non-OOM) failures at this ctx — log but don't skip larger values
                 print(f"    num_ctx={value} had {result.failed_count} non-OOM failure(s)")
 
-            all_tps.append(result.avg_tokens_per_sec)
-            all_ttft.append(result.avg_ttft_ms)
+            all_total_time.append(result.avg_total_time_ms)
 
-            tps_range = (min(all_tps), max(all_tps))
-            ttft_range = (min(all_ttft), max(all_ttft))
+            total_time_range = (min(all_total_time), max(all_total_time))
             composite = compute_composite(
-                result.avg_quality, result.avg_tokens_per_sec, result.avg_ttft_ms,
-                tps_range, ttft_range, weights,
+                result.avg_quality, result.avg_total_time_ms,
+                total_time_range, weights,
             )
 
             is_best = composite > best_composite_for_param
@@ -710,6 +711,7 @@ def coordinate_descent(
                 "param_being_optimized": param_name,
                 "tokens_per_sec": f"{result.avg_tokens_per_sec:.2f}",
                 "ttft_ms": f"{result.avg_ttft_ms:.0f}",
+                "total_time_ms": f"{result.avg_total_time_ms:.0f}",
                 "objective_score": f"{result.avg_objective_score:.2f}",
                 "judge_score": f"{result.avg_judge_score:.2f}",
                 "quality_score": f"{result.avg_quality:.2f}",
@@ -736,7 +738,7 @@ def coordinate_descent(
         "infra_config": infra_config, "model": model,
         "phase": "complete", "param_being_optimized": "none",
         **{p: best_params[p] for p in param_order},
-        "tokens_per_sec": "", "ttft_ms": "", "objective_score": "",
+        "tokens_per_sec": "", "ttft_ms": "", "total_time_ms": "", "objective_score": "",
         "judge_score": "", "quality_score": "", "composite_score": "",
         "is_best": "", "notes": "sweep_complete",
     })
@@ -770,11 +772,11 @@ def validate_config(config: dict) -> None:
 
     # scoring
     scoring = config.get("scoring", {})
-    for key in ("quality_weight", "speed_weight", "ttft_weight"):
+    for key in ("quality_weight", "latency_weight"):
         if key not in scoring:
             errors.append(f"  missing: scoring.{key}")
     if not errors:
-        total = sum(scoring.get(k, 0) for k in ("quality_weight", "speed_weight", "ttft_weight"))
+        total = sum(scoring.get(k, 0) for k in ("quality_weight", "latency_weight"))
         if abs(total - 1.0) > 0.01:
             print(f"  WARNING: scoring weights sum to {total:.3f}, expected 1.0")
 

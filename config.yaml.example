@@ -56,8 +56,7 @@ defaults:
 
 scoring:
   quality_weight: 0.65
-  speed_weight: 0.25
-  ttft_weight: 0.10
+  latency_weight: 0.35  # total wall-clock time per prompt (includes thinking time)
 
 judge:
   model: claude-sonnet-4-20250514
