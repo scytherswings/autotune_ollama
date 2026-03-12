@@ -1313,6 +1313,21 @@ def main():
     print(f"  Results: {tsv_path}")
     print(f"{'='*60}")
 
+    # Stop the Ollama container — leave GPU memory free after the run
+    last_infra = infra_configs[-1] if infra_configs else None
+    if last_infra:
+        compose_file = Path(compose_dir) / f"docker-compose.{last_infra}.yml"
+        env = os.environ.copy()
+        env["OLLAMA_VOLUME"] = ollama_volume
+        result = subprocess.run(
+            ["docker", "compose", "-p", compose_project, "-f", str(compose_file), "down"],
+            capture_output=True, text=True, env=env,
+        )
+        if result.returncode == 0:
+            print("  Ollama container stopped.")
+        else:
+            print(f"  WARNING: could not stop Ollama container: {result.stderr.strip()}")
+
 
 if __name__ == "__main__":
     main()
