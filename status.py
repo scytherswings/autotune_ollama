@@ -31,7 +31,7 @@ def best_configs(data, top_n=5):
     """Best (model, num_ctx, temperature, top_p) combos by avg quality, min 4 samples."""
     configs = defaultdict(list)
     for r in data:
-        key = (r["model"], r["num_ctx"], r["temperature"], r["top_p"], r["top_k"], r["repeat_penalty"])
+        key = (r["model"], r.get("num_ctx", "N/A"), r.get("temperature", "N/A"), r.get("top_p", "N/A"), r.get("top_k", "N/A"), r.get("repeat_penalty", "N/A"))
         configs[key].append(r["quality"])
     ranked = [
         (sum(v) / len(v), len(v), k)

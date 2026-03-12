@@ -36,8 +36,8 @@ def model_ranking(data):
 def best_overall_config(data, min_samples=4):
     configs = defaultdict(list)
     for r in data:
-        key = (r["model"], r["num_ctx"], r["temperature"], r["top_p"],
-               r["top_k"], r["repeat_penalty"], r["num_predict"])
+        key = (r["model"], r.get("num_ctx"), r.get("temperature"), r.get("top_p"),
+               r.get("top_k"), r.get("repeat_penalty"), r.get("num_predict"))
         configs[key].append(r["quality"])
     ranked = [
         (sum(v) / len(v), len(v), k)
@@ -61,7 +61,7 @@ def param_effects(data):
                 continue
             by_val = defaultdict(list)
             for r in sweep:
-                by_val[r[param]].append(r["quality"])
+                by_val[r.get(param)].append(r["quality"])
             result[model][param] = {v: sum(q) / len(q) for v, q in sorted(by_val.items())}
     return result
 
