@@ -19,6 +19,7 @@ load_dotenv()  # Load .env before anything touches os.environ
 sys.stdout.reconfigure(line_buffering=True)  # Flush after each line when piped to tee/log
 
 from eval_harness import (
+    OllamaOomError,
     check_gpu_fit,
     check_objective_criteria,
     get_ollama_allocation,
@@ -55,6 +56,10 @@ TSV_COLUMNS = [
     "is_best",
     "notes",
 ]
+
+
+class TpsFailure(Exception):
+    """Raised when TPS drops below the minimum — signals CPU fallback for the whole run."""
 
 
 @dataclass
@@ -367,10 +372,12 @@ def evaluate_params(
                 continue
 
             if min_tokens_per_sec > 0 and tps < min_tokens_per_sec:
-                raise RuntimeError(
+                raise TpsFailure(
                     f"TPS too low ({tps:.1f} < {min_tokens_per_sec} minimum) — likely CPU fallback"
                 )
 
+        except TpsFailure:
+            raise  # abort the entire eval run immediately
         except Exception as e:
             print(f"    Inference failed for {prompt_id}: {e}")
             per_prompt.append({"id": prompt_id, "type": prompt_type, "error": str(e)})
@@ -538,7 +545,9 @@ def coordinate_descent(
     min_tps = config["budget"].get("min_tokens_per_sec", 0)
     compose_project = config["infra"].get("compose_project", "ollama-autotune")
     ollama_container = f"{compose_project}-ollama-1"
-    param_order = list(search_space.keys())
+    # param_order includes ALL defaults keys (not just swept ones) so experiment keys
+    # remain stable when params are removed from search_space but kept in defaults.
+    param_order = list(defaults.keys())
 
     best_params = deepcopy(defaults)
     all_tps = []
@@ -554,14 +563,18 @@ def coordinate_descent(
             print("  Budget exhausted!")
             return best_params
 
-        baseline_result = evaluate_params(
-            model=model, infra_config=infra_config, phase="baseline",
-            param_being_optimized="none", params=defaults,
-            eval_prompts=eval_prompts, base_url=base_url,
-            judge_model=judge_model, judge_weights=judge_weights,
-            type_weights=type_weights,
-            details_path=details_path, min_tokens_per_sec=min_tps,
-        )
+        try:
+            baseline_result = evaluate_params(
+                model=model, infra_config=infra_config, phase="baseline",
+                param_being_optimized="none", params=defaults,
+                eval_prompts=eval_prompts, base_url=base_url,
+                judge_model=judge_model, judge_weights=judge_weights,
+                type_weights=type_weights,
+                details_path=details_path, min_tokens_per_sec=min_tps,
+            )
+        except TpsFailure as e:
+            print(f"  Baseline aborted — {e}. Skipping model.")
+            return best_params
         api_call_count[0] += len(eval_prompts)
 
         all_tps.append(baseline_result.avg_tokens_per_sec)
@@ -601,6 +614,8 @@ def coordinate_descent(
 
     # Phase 2: Coordinate descent
     for param_name in param_order:
+        if param_name not in search_space:
+            continue  # fixed param, not swept
         print(f"\n  --- Optimizing: {param_name} ---")
         phase = "sweep"
 
@@ -632,14 +647,33 @@ def coordinate_descent(
                 unload_model(model, base_url)
             load_time = datetime.now(timezone.utc).isoformat()
 
-            result = evaluate_params(
-                model=model, infra_config=infra_config, phase="sweep",
-                param_being_optimized=param_name, params=trial_params,
-                eval_prompts=eval_prompts, base_url=base_url,
-                judge_model=judge_model, judge_weights=judge_weights,
-                type_weights=type_weights,
-                details_path=details_path, min_tokens_per_sec=min_tps,
-            )
+            try:
+                result = evaluate_params(
+                    model=model, infra_config=infra_config, phase="sweep",
+                    param_being_optimized=param_name, params=trial_params,
+                    eval_prompts=eval_prompts, base_url=base_url,
+                    judge_model=judge_model, judge_weights=judge_weights,
+                    type_weights=type_weights,
+                    details_path=details_path, min_tokens_per_sec=min_tps,
+                )
+            except (TpsFailure, OllamaOomError) as e:
+                label = "tps_fail" if isinstance(e, TpsFailure) else "oom"
+                print(f"    {param_name}={value} aborted — {e}")
+                append_tsv(tsv_path, {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "infra_config": infra_config, "model": model,
+                    "phase": phase, "param_being_optimized": param_name,
+                    **{p: trial_params[p] for p in param_order},
+                    "tokens_per_sec": "0", "ttft_ms": "0",
+                    "objective_score": "0", "judge_score": "0",
+                    "quality_score": "0", "composite_score": "0",
+                    "is_best": "false", "notes": label,
+                })
+                completed.add(key)
+                completed_scores[key] = 0.0
+                if param_name == "num_ctx":
+                    break  # skip larger ctx values
+                continue
             api_call_count[0] += len(eval_prompts)
 
             if param_name == "num_ctx":
@@ -652,8 +686,8 @@ def coordinate_descent(
                     print(f"    ollama: {gpu_layers}/{total_layers} layers on GPU  |  KV: {kv_gpu:.0f}MB GPU + {kv_cpu:.0f}MB CPU")
 
             if param_name == "num_ctx" and result.failed_count > 0:
-                print(f"    num_ctx={value} had {result.failed_count} failure(s) — skipping larger values")
-                break
+                # Generic (non-OOM) failures at this ctx — log but don't skip larger values
+                print(f"    num_ctx={value} had {result.failed_count} non-OOM failure(s)")
 
             all_tps.append(result.avg_tokens_per_sec)
             all_ttft.append(result.avg_ttft_ms)
@@ -696,6 +730,17 @@ def coordinate_descent(
         best_composite = best_composite_for_param
         print(f"  Best {param_name}: {best_value_for_param} (composite: {best_composite:.2f})")
 
+    # Write a sentinel so future runs can skip this model+infra without loading it
+    append_tsv(tsv_path, {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "infra_config": infra_config, "model": model,
+        "phase": "complete", "param_being_optimized": "none",
+        **{p: best_params[p] for p in param_order},
+        "tokens_per_sec": "", "ttft_ms": "", "objective_score": "",
+        "judge_score": "", "quality_score": "", "composite_score": "",
+        "is_best": "", "notes": "sweep_complete",
+    })
+
     return best_params
 
 
@@ -721,9 +766,7 @@ def validate_config(config: dict) -> None:
     for key in search_space:
         if key not in defaults:
             errors.append(f"  search_space key '{key}' has no entry in defaults")
-    for key in defaults:
-        if key not in search_space:
-            errors.append(f"  defaults key '{key}' has no entry in search_space")
+    # defaults may contain fixed params not in search_space (passed through to Ollama unchanged)
 
     # scoring
     scoring = config.get("scoring", {})
@@ -820,7 +863,27 @@ def main():
             print(f"  SKIPPING infra config: {infra_config} (API not ready after 90s)")
             continue
 
+        skip_models = set(config.get("skip_models", []))
+
         for model in models:
+            if model in skip_models:
+                print(f"\n  Skipping {model} (listed in skip_models)")
+                continue
+
+            # Check for the sweep-complete sentinel written at end of coordinate_descent.
+            # Avoids pulling the model into GPU memory when there's nothing left to do.
+            _defaults_check = config["defaults"]
+            _param_order_check = list(_defaults_check.keys())
+            sentinel_key = _experiment_key(
+                infra_config, model, "complete", "none",
+                *[_defaults_check[p] for p in _param_order_check]
+            )
+            # Sentinel key uses default param values as placeholder — match on prefix instead
+            sentinel_prefix = f"{infra_config}|{model}|complete|"
+            if any(k.startswith(sentinel_prefix) for k in completed):
+                print(f"\n  Skipping {model} @ {infra_config} — sweep already complete")
+                continue
+
             print(f"\n{'='*60}")
             print(f"Model: {model} | Infra: {infra_config}")
             print(f"{'='*60}")

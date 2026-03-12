@@ -10,6 +10,30 @@ from dataclasses import dataclass, field
 import requests
 
 
+class OllamaOomError(RuntimeError):
+    """Raised when Ollama returns a 500 that is confirmed to be an OOM/allocation failure."""
+
+
+_OOM_KEYWORDS = (
+    "out of memory", "cuda error", "cudamalloc", "failed to allocate",
+    "cannot allocate", "kv cache", "ggml_cuda", "cublas",
+)
+
+
+def _raise_for_status_with_oom_check(resp: requests.Response) -> None:
+    """Like raise_for_status() but raises OllamaOomError for confirmed OOM 500s."""
+    if resp.status_code == 500:
+        try:
+            body = resp.text.lower()
+        except Exception:
+            body = ""
+        if any(kw in body for kw in _OOM_KEYWORDS):
+            raise OllamaOomError(f"Ollama OOM (500): {resp.text[:200]}")
+        resp.raise_for_status()  # non-OOM 500 — raise normally
+    else:
+        resp.raise_for_status()
+
+
 @dataclass
 class InferenceResult:
     """Result from a single inference run."""
@@ -209,7 +233,19 @@ def run_tool_inference(
         stream=True,
         timeout=300,
     )
-    resp.raise_for_status()
+
+    # If the model doesn't support the tools parameter (400), retry as plain chat
+    # and rely on text-based JSON parsing for tool call extraction.
+    if resp.status_code == 400 and tools:
+        text_body = {k: v for k, v in request_body.items() if k != "tools"}
+        resp = requests.post(
+            f"{base_url}/api/chat",
+            json=text_body,
+            stream=True,
+            timeout=300,
+        )
+
+    _raise_for_status_with_oom_check(resp)
 
     for line in resp.iter_lines():
         if not line:
@@ -335,58 +371,35 @@ def check_objective_criteria(
 
 
 def check_gpu_fit(model: str, base_url: str) -> bool:
-    """Check if a model is fully loaded on GPU (no CPU layer offload).
+    """Log GPU vs CPU memory split for a loaded model. Always returns True.
 
-    Loads the model first by sending a minimal request, then checks /api/ps.
-    Returns True if 100% GPU, False otherwise.
+    We no longer gate on GPU fraction — MoE models legitimately spill inactive
+    experts to CPU without major TPS impact. The min_tokens_per_sec guard in
+    autotune.py is the real arbiter of whether a model is fast enough.
     """
-    # Ensure model is loaded by sending a tiny request
-    try:
-        resp = requests.post(
-            f"{base_url}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": False,
-                "options": {"num_predict": 1},
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"  WARNING: Could not load model {model} for GPU check: {e}")
-        return False
-
-    # Now check /api/ps
     try:
         resp = requests.get(f"{base_url}/api/ps", timeout=10)
         resp.raise_for_status()
         data = resp.json()
-    except requests.RequestException as e:
-        print(f"  WARNING: Could not check /api/ps: {e}")
-        return False
+    except requests.RequestException:
+        return True  # Can't check — let it proceed, TPS guard will catch slow models
 
     loaded = data.get("models", [])
-
-    # Try exact match first; fall back to substring to handle digest-suffixed names
     match = next((m for m in loaded if m.get("name", "") == model), None)
     if match is None:
         match = next((m for m in loaded if model in m.get("name", "")), None)
 
-    if match is None:
-        print(f"  WARNING: Model {model} not found in /api/ps after loading")
-        return False
+    if match:
+        size_vram = match.get("size_vram", 0)
+        size = match.get("size", 0)
+        if size > 0:
+            gpu_pct = size_vram / size * 100
+            cpu_pct = 100 - gpu_pct
+            if cpu_pct > 5:
+                print(f"  Model {model}: {gpu_pct:.0f}% GPU / {cpu_pct:.0f}% CPU (TPS guard will validate)")
+            else:
+                print(f"  Model {model}: fully in GPU VRAM")
 
-    size_vram = match.get("size_vram", 0)
-    size = match.get("size", 0)
-
-    if size > 0:
-        gpu_fraction = size_vram / size
-        if gpu_fraction < 0.95:  # >5% on CPU → skip
-            print(f"  Model {model}: {gpu_fraction * 100:.0f}% GPU — SKIPPING (CPU offload detected)")
-            return False
-
-    print(f"  Model {model}: fully in GPU VRAM")
     return True
 
 
@@ -454,7 +467,7 @@ def run_inference(
         stream=True,
         timeout=300,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_oom_check(resp)
 
     for line in resp.iter_lines():
         if not line:

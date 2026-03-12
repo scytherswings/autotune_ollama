@@ -5,11 +5,21 @@ infra:
   compose_project: ollama-autotune
   ollama_volume: ollama_ollama
 
+# Models that fit in 12GB VRAM. qwen3-coder:30b is listed last as a slow reference point.
 models:
-  - llama3.1:8b-instruct-q8_0
+  - llama3.1:8b-instruct-q8_0          # Meta tool-use training; fast baseline
+  - gemma3:12b                          # strong for size; already pulled
+  - qwen3:14b                           # Qwen3 family; already pulled
+  - qwen2.5-coder:14b-instruct-q4_K_M  # coding eval winner; tool-calling unknown
+  - deepseek-coder-v2:16b-lite-instruct-q4_K_M  # MoE; #2 in coding eval
+  - qwen3-coder:30b                     # 17GB — will CPU-offload; slow reference point
+
+# Models to skip entirely — no pull, no eval. Useful for models known to be
+# incompatible (e.g. no native tool support) or already eliminated.
+# gemma3 and deepseek eliminated: tool_call scores 4.94 / 4.44 — not competitive
+# for tool-call use cases. Baseline data preserved in results.tsv for reference.
+skip_models:
   - gemma3:12b
-  - qwen3:14b
-  - qwen2.5-coder:14b-instruct-q4_K_M
   - deepseek-coder-v2:16b-lite-instruct-q4_K_M
 
 infra_configs:
@@ -19,20 +29,22 @@ infra_configs:
 eval:
   types: [coding, tool_call]
   prompts_file: eval_prompts.json
-  # How much each type contributes to the blended quality score that coordinate descent optimizes.
-  # Tune this to reflect your actual use-case priorities.
-  # Must sum to 1.0 across all active types.
+  # tool_call is the primary use case; coding eval as secondary signal
   type_weights:
     coding: 0.40
     tool_call: 0.60
 
+# num_ctx includes large values for potential RAG use later; coordinate descent will
+# find the best value and the GPU allocation logging will show VRAM impact.
 search_space:
   num_ctx: [4096, 8192, 16384, 32768]
   temperature: [0.0, 0.1, 0.3]
-  top_p: [0.9, 0.95, 1.0]
-  top_k: [20, 40, 80]
-  repeat_penalty: [1.0, 1.1]
-  num_predict: [512, 1024, 2048]
+  top_p: [0.9, 1.0]
+  # num_predict dropped: not a meaningful tuning knob — responses are short for
+  # tool_call, and thinking models (qwen3) need uncapped generation budget.
+  # top_k dropped: Δ0.07–0.11 across all models, within noise
+  # repeat_penalty dropped: no measurable sensitivity in results
+  # top_p middle value (0.95) dropped: keep extremes only
 
 defaults:
   num_ctx: 8192
@@ -40,7 +52,7 @@ defaults:
   top_p: 0.95
   top_k: 40
   repeat_penalty: 1.0
-  num_predict: 1024
+  num_predict: -1  # unlimited — thinking models need uncapped generation budget
 
 scoring:
   quality_weight: 0.65
@@ -50,19 +62,16 @@ scoring:
 judge:
   model: claude-sonnet-4-20250514
   quality_weights:
-    # --- Coding sub-scores (must sum to 1.0) ---
     coding_correctness: 0.40
     coding_completeness: 0.30
     coding_clarity: 0.20
     coding_agent_utility: 0.10
 
-    # --- Tool-call blend: objective checks vs. Claude judge (must sum to 1.0) ---
-    objective_weight: 0.50   # deterministic: JSON valid, correct tool chosen, required args present
-    judge_weight: 0.50       # semantic: Claude scores arg values and tool selection
+    objective_weight: 0.50
+    judge_weight: 0.50
 
-    # --- Tool-call semantic sub-scores (must sum to 1.0) ---
-    tool_arg_correctness: 0.60  # were argument values right given the user's request?
-    tool_selection: 0.40        # was the correct tool (or no tool) chosen?
+    tool_arg_correctness: 0.60
+    tool_selection: 0.40
 
 budget:
   max_api_calls: 10000
