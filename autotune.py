@@ -907,6 +907,10 @@ def coordinate_descent(
         )
         best_params["num_ctx"] = detected_ctx
         defaults = {**defaults, "num_ctx": detected_ctx}
+        # Reload model at the detected ctx so the first baseline prompt isn't cold.
+        # detect_max_ctx() calls unload_model() repeatedly during probing, leaving
+        # the model in an unknown state after the binary search completes.
+        warmup(model, base_url, options=defaults)
 
     # Baseline uses full-quality Sonnet; sweep uses cheaper Haiku for relative ranking
     judge_model_baseline = judge_model
@@ -1364,8 +1368,6 @@ def main():
             if not check_gpu_fit(model, base_url):
                 print(f"  SKIPPING model {model}: does not fit in GPU")
                 continue
-
-            warmup(model, base_url, options=config["defaults"])
 
             best_params = coordinate_descent(
                 model=model,
