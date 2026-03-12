@@ -107,13 +107,13 @@ docker compose -p ollama-autotune -f configs/docker-compose.baseline.yml down
 ## 9. Generate reference answers
 
 Once you've finalized your eval prompts in `eval_prompts.json`, generate Opus reference
-answers (one-time, ~8 API calls):
+answers (one-time, ~15 API calls):
 
 ```bash
 python generate_references.py
 ```
 
-Review `eval_prompts.json` to confirm the references look correct.
+This writes `references.json` (gitignored). Review it to confirm the answers look correct.
 
 ## 10. Run
 
@@ -124,8 +124,8 @@ python autotune.py
 autotune.py manages the full lifecycle:
 - Starts/restarts the Ollama Docker container for each infra config
 - Pulls models as needed (models persist in `ollama_ollama` volume)
-- Runs eval suite, judges output quality, logs results to `results.tsv`
-- Resume after interruption by running again — reads existing `results.tsv`
+- Runs eval suite, judges output quality, logs results to `results.tsv` and `details.jsonl`
+- Resume after interruption by running again — reads completed experiment keys from `results.tsv`
 
 ---
 

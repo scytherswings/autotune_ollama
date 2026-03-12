@@ -25,6 +25,14 @@ results.tsv
 results_*.tsv
 *.log
 
+# Run artifacts (ephemeral eval data)
+details.jsonl
+details_*.jsonl
+*.jsonl.bak*
+*.json.bak*
+*.tsv.bak*
+*.yaml.bak*
+
 # Generated reference answers (re-create with generate_references.py)
 references.json
 
