@@ -1,6 +1,6 @@
 {
-  "version": "2.2.0",
-  "description": "Unified eval suite: coding and tool-calling. Trimmed 3 low-discrimination prompts (bash-csv-sqlite, no-tool-knowledge-question, no-tool-policy).",
+  "version": "3.0.0",
+  "description": "Unified eval suite: coding, tool-calling, and business chat (single-turn, 2-turn refinement, 3-turn context stress test).",
   "tool_sets": {
     "booking": [
       {
@@ -344,6 +344,115 @@
       "expected_tool": null,
       "required_args": [],
       "notes": "Maximally underspecified booking request. Model must NOT call create_appointment with fabricated args \u2014 must ask for client name, service, date, and time."
+    }
+  ],
+  "chat_prompts": [
+    {
+      "id": "meeting-agenda",
+      "category": "chat",
+      "subcategory": "single_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "I have a 60-minute product roadmap review next Thursday with 5 people: myself (CEO), our Head of Product (Sara), Lead Engineer (Tom), VP Sales (David), and a new external advisor (Rachel Kim, ex-Stripe, joining for the first time). The goal is to align on Q3 priorities and make a go/no-go decision on whether to delay a major infrastructure migration that's been on the roadmap for 6 months. Create a meeting agenda."
+        }
+      ],
+      "notes": "Baseline single-turn. Tests structured document generation from a clear brief. Good response will include time allocations, named agenda items, and address the decision that needs to be made."
+    },
+    {
+      "id": "action-items",
+      "category": "chat",
+      "subcategory": "single_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Extract all action items from this meeting transcript. For each item include: owner, what they need to do, and deadline if mentioned.\n\n---\nJamie: OK so let's wrap up. Marcus, you said you'd get the pricing deck updated before the board meeting?\nMarcus: Yeah I'll have that done by end of Wednesday.\nJamie: Great. And Priya, the onboarding checklist — where are we on that?\nPriya: I need another week. I'll send the draft to the team by Friday the 14th for review.\nJamie: That works. Tom, you were going to set up the staging environment for the new integration, right?\nTom: Yep, I'll have it ready for QA by next Monday morning.\nJamie: Perfect. I'll send the board prep materials out by tomorrow EOD, and I'll also schedule the pre-board alignment call — I'm thinking Tuesday at 2pm, I'll send a calendar invite. Sarah, can you pull the churn numbers for Q1 vs Q2? We'll need those for the board deck.\nSarah: Sure, I can have those to you by tomorrow afternoon.\nJamie: Great. Let's make sure we actually do a retrospective after the board meeting this time — I'll put something on the calendar for the Thursday after.\n---"
+        }
+      ],
+      "notes": "Extraction task from realistic transcript. Tests whether model captures all owners and deadlines accurately without hallucinating items or missing any."
+    },
+    {
+      "id": "status-email",
+      "category": "chat",
+      "subcategory": "single_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Draft a professional weekly status update email to send to our investor group (4 investors, all familiar with our business). Keep it under 200 words. Here are the key points from this week:\n\n- Closed two new enterprise deals: Northgate Legal ($48K ARR) and Bloom Consulting ($31K ARR)\n- Lost one renewal: Apex Group churned, $22K ARR, cited poor onboarding experience\n- New ARR this week: net +$57K, total now $3.18M\n- Priya's onboarding redesign is live for all new customers starting this week\n- Engineering shipped the client dashboard feature (was 2 weeks late but quality looks good)\n- Pipeline: 3 deals in final stage, combined $140K ARR, expected close within 30 days"
+        }
+      ],
+      "notes": "Email drafting from bullet points. Tests professional tone, appropriate brevity, and correct math ($48K + $31K - $22K = $57K net). Good response will not editorialize or add fluff."
+    },
+    {
+      "id": "exec-summary",
+      "category": "chat",
+      "subcategory": "single_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Turn these raw project notes into a polished executive summary (max 150 words) for inclusion in a board deck. The audience is non-technical board members.\n\nRaw notes:\n- project: migrate from legacy monolith to microservices\n- started Q4 last year, originally planned 6 months\n- now at month 9, still not done\n- root cause of delay: underestimated data migration complexity, had to rebuild 3 services from scratch after discovering schema inconsistencies\n- current status: 7 of 11 services migrated, remaining 4 are lower risk\n- what's working: team velocity has improved significantly in migrated services, deployment time down from 4 hours to 18 minutes\n- risks: 2 engineers on the migration are being pulled for a customer escalation next month\n- projected completion: end of Q3 with current resourcing, end of Q2 if we backfill the 2 engineers\n- ask: approval to hire 2 contract engineers at ~$15K/month each for 3 months"
+        }
+      ],
+      "notes": "Synthesis task. Tests ability to distill messy notes into clean prose without losing key facts (delay, root cause, ask). Must not use technical jargon for board audience."
+    },
+    {
+      "id": "agenda-refine",
+      "category": "chat",
+      "subcategory": "two_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Create a 90-minute quarterly business review agenda for our leadership team of 8 (CEO, CFO, CTO, VP Sales, VP Marketing, Head of Product, Head of Customer Success, Head of Engineering). Focus on Q2 results and Q3 planning."
+        },
+        {
+          "role": "user",
+          "content": "The CFO just cancelled — she'll send a written financial summary instead. Cut the financial review segment to 5 minutes max (just time to review her written update). Use the freed-up time to add a 20-minute discussion on a new enterprise market opportunity we've been seeing in the financial services sector. Keep the total at 90 minutes."
+        }
+      ],
+      "notes": "2-turn refinement. Turn 2 tests whether the model actually restructures the agenda (removes CFO-led time, trims finance, adds the new item) rather than just appending. Total time must still sum to 90 minutes."
+    },
+    {
+      "id": "audience-rewrite",
+      "category": "chat",
+      "subcategory": "two_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Write a one-page summary of why we're migrating our backend from a monolithic Django application to a FastAPI microservices architecture. This version is for our engineering team — assume they know what these technologies are."
+        },
+        {
+          "role": "user",
+          "content": "Now rewrite that summary for our enterprise customers. They are non-technical executives who care about reliability, security, and ROI — not implementation details. No acronyms, no tech stack names. Focus on what this means for them: uptime, performance, and our ability to respond faster to their feature requests."
+        }
+      ],
+      "notes": "2-turn audience shift. Turn 2 tests whether the model genuinely rewrites for a different audience (no tech terms, benefits framing) rather than lightly editing the Turn 1 response."
+    },
+    {
+      "id": "q3-planning-stress",
+      "category": "chat",
+      "subcategory": "three_turn",
+      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Here's our situation at Meridian Analytics — please review this before we start planning.\n\nMeridian Analytics is a B2B SaaS platform that helps mid-market professional services firms (law firms, accounting firms, consultancies) track client engagement and project profitability. Founded in 2019 by Clara Webb (CEO, ex-McKinsey) and James Park (CTO, ex-Palantir). Bootstrapped to $1.8M ARR before raising a $4M seed round in 2023 from Foundry Capital.\n\nCurrent state: 51 employees, $3.1M ARR, 74 active customers. Average contract value is $42K/year. Main competition is Salesforce (too complex for our buyers) and spreadsheets (too manual). Our ICP is professional services firms with 20–200 employees.\n\nQ1 results (Jan–Mar 2026): Missed our $3.4M ARR target by 18%. Churn spiked to 9.4% — our worst quarter on record. Six customers churned, all within their first 90 days. Net new logo growth was 3 against a target of 8.\n\nRoot cause (confirmed via exit interviews with all 6 churned customers): Onboarding was taking 11+ weeks on average. Customers sign, then go dark during implementation, lose organizational momentum, and by go-live the internal champion has either moved on or lost executive support. The product itself has strong NPS of 52 once customers are fully onboarded — the problem is getting them there.\n\nQ2 response (Apr–Jun 2026, in progress): We hired two implementation specialists — Priya Sharma (from ServiceNow) and Ben Torres (from Salesforce). We rebuilt the onboarding playbook targeting 4-week go-live. We also shipped an automated implementation progress dashboard so customers can track status without waiting on weekly calls from us. Early signal: the 7 customers onboarded under the new playbook have averaged 4.8 weeks to go-live. No churn from this cohort so far.\n\nQ3 goals (Jul–Sep 2026): Reduce churn to below 4%. Grow ARR from $3.1M to $4.0M — requires 12 net new logos plus expansion from existing customers. Close our Series A ($8M target; active conversations with Emergence Capital, Bessemer, and one undisclosed firm). Key constraint: CFO Yuki Tanaka has frozen all headcount additions until we either hit $3.5M ARR or close the Series A.\n\nKey attendees for our Q3 planning session next Tuesday:\n- Clara Webb, CEO — sets strategy, owns investor relationships\n- James Park, CTO — owns product roadmap and technical implementation\n- Priya Sharma, Head of Implementation — owns the new onboarding playbook\n- Marcus Chen, VP Sales — joined April 2026, came from Databricks, still ramping on our ICP and sales motion\n- Yuki Tanaka, CFO — controls budget, skeptical of headcount asks, wants to see churn improvement data before approving anything\n\nPlease create a 90-minute Q3 planning agenda for next Tuesday (July 7, 2026). The primary goal is to assess whether we have enough Q2 signal to confidently project hitting Q3 targets, and to decide how to resource the sales push given Yuki's headcount freeze."
+        },
+        {
+          "role": "user",
+          "content": "Good. For each agenda item, add 2–3 specific discussion questions that will actually drive the conversation forward. Mark each item clearly as either DECISION (a clear choice needs to be made in the room) or UPDATE (informational, no decision required)."
+        },
+        {
+          "role": "user",
+          "content": "One more thing. Marcus is joining his first full planning session — he came from Databricks in April and hasn't been through a Meridian planning cycle before. Write him a 150-word pre-read that gives him the context he needs: what happened in Q1, why it happened, and what we've done about it in Q2. Be specific — use the actual numbers. Don't assume he knows any of this history."
+        }
+      ],
+      "notes": "3-turn context stress test. Turn 3 explicitly asks for specific details from Turn 1 (18% miss, 9.4% churn, 11-week onboarding, exit interview findings, Priya and Ben hired, 4.8-week average under new playbook). Models with truncated context will produce vague or incorrect pre-reads missing the key numbers."
     }
   ]
 }

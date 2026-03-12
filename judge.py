@@ -189,6 +189,87 @@ Return JSON only:
 {{"correctness": N, "completeness": N, "clarity": N, "agent_utility": N, "brief_rationale": "one sentence explaining the correctness score"}}"""
 
 
+JUDGE_CHAT_TEMPLATE = """You are evaluating the quality of a business chat response from a language model.
+
+The model was given this system prompt:
+<system_prompt>{system_prompt}</system_prompt>
+
+The conversation so far:
+<conversation>
+{conversation_history}
+</conversation>
+
+The model's final response:
+<response>{response}</response>
+{reference_section}
+Score 1–10 on each criterion. Use the full range — reserve 10 for exceptional and 1 for useless.
+
+1. instruction_following: Did the model do exactly what was asked?
+   - Correct format (agenda, email, bullet list, etc.), right length, addressed the actual request
+   - 1 = ignored instructions; 10 = followed every instruction precisely
+
+2. content_quality: Is the substance genuinely useful?
+   - Well-reasoned, specific, grounded in the context provided — not generic filler
+   - Decisions are logical, recommendations are actionable, structure serves the purpose
+   - 1 = vague or useless; 10 = would use this as-is in a real business setting
+
+3. professionalism: Is the tone, structure, and language appropriate for business use?
+   - No unnecessary hedging, no fluff, no overly casual or overly formal language
+   - 1 = unprofessional or jarring; 10 = polished and appropriate
+
+4. conciseness: Is the response the right length — no padding, no unnecessary caveats?
+   - Gets to the point without being terse; doesn't repeat itself
+   - 1 = bloated or padded; 10 = exactly as long as it needs to be
+
+5. context_retention: Does the response accurately use specific details from earlier in the conversation?
+   - Names, numbers, constraints, and decisions from prior turns are referenced correctly
+   - For a first turn with no prior context, score this 10
+   - 1 = ignores or contradicts earlier context; 10 = accurately integrates all relevant prior details
+
+Return JSON only:
+{{"instruction_following": N, "content_quality": N, "professionalism": N, "conciseness": N, "context_retention": N, "brief_rationale": "one sentence on the most important strength or weakness"}}"""
+
+
+def judge_chat(
+    prompt_entry: dict,
+    conversation: list[dict],
+    response_text: str,
+    reference: str | None = None,
+    model: str = "claude-sonnet-4-20250514",
+) -> dict:
+    """Judge the quality of a business chat response.
+
+    Args:
+        conversation: Full message history including the final user turn
+                      (list of {role, content} dicts, without the model's final response)
+        response_text: The model's final response to judge
+        reference: Pre-generated Opus reference answer for this prompt
+
+    Returns dict with keys: instruction_following, content_quality, professionalism,
+                            conciseness, context_retention, brief_rationale
+    """
+    history_text = "\n\n".join(
+        f"[{m['role'].upper()}]: {m['content']}"
+        for m in conversation
+        if m["role"] != "system"
+    )
+    reference_section = (
+        f"\nReference (ideal response from a top-tier model):\n<reference>{reference}</reference>\n"
+        if reference else ""
+    )
+    judge_prompt = JUDGE_CHAT_TEMPLATE.format(
+        system_prompt=prompt_entry.get("system_prompt", ""),
+        conversation_history=history_text,
+        response=response_text,
+        reference_section=reference_section,
+    )
+    return _call_judge(
+        judge_prompt, model,
+        ["instruction_following", "content_quality", "professionalism",
+         "conciseness", "context_retention", "brief_rationale"],
+    )
+
+
 def judge_output(
     prompt: str,
     candidate: str,

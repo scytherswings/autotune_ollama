@@ -27,12 +27,13 @@ infra_configs:
   - flash-attn
 
 eval:
-  types: [coding, tool_call]
+  types: [coding, tool_call, chat]
   prompts_file: eval_prompts.json
-  # tool_call is the primary use case; coding eval as secondary signal
+  # chat is the primary use case; tool_call secondary; coding as reference signal
   type_weights:
-    coding: 0.40
-    tool_call: 0.60
+    coding: 0.20
+    tool_call: 0.40
+    chat: 0.40
 
 # num_ctx includes large values for potential RAG use later; coordinate descent will
 # find the best value and the GPU allocation logging will show VRAM impact.
@@ -71,6 +72,12 @@ judge:
 
     tool_arg_correctness: 0.60
     tool_selection: 0.40
+
+    chat_instruction_following: 0.25
+    chat_content_quality: 0.30
+    chat_professionalism: 0.20
+    chat_conciseness: 0.15
+    chat_context_retention: 0.10
 
 budget:
   max_api_calls: 10000

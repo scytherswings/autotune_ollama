@@ -523,6 +523,103 @@ def run_inference(
     )
 
 
+def run_chat_inference(
+    model: str,
+    turns: list[str],
+    options: dict,
+    base_url: str,
+    system_prompt: str | None = None,
+) -> InferenceResult:
+    """Run a multi-turn chat conversation against Ollama /api/chat.
+
+    Sends each user turn sequentially, threading assistant responses back
+    into the message history. TTFT is from the first turn. TPS and
+    total_duration_ns are aggregated across all turns.
+    """
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    total_eval_count = 0
+    total_eval_duration_ns = 0
+    total_prompt_eval_duration_ns = 0
+    total_duration_ns_sum = 0
+    first_ttft_ms: float | None = None
+    final_response = ""
+
+    for user_message in turns:
+        messages.append({"role": "user", "content": user_message})
+
+        request_body = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "options": options,
+        }
+
+        start_time = time.perf_counter()
+        first_token_time = None
+        response_chunks = []
+        eval_count = 0
+        eval_duration_ns = 0
+        prompt_eval_duration_ns = 0
+        total_duration_ns = 0
+
+        resp = requests.post(
+            f"{base_url}/api/chat",
+            json=request_body,
+            stream=True,
+            timeout=300,
+        )
+        _raise_for_status_with_oom_check(resp)
+
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            data = json.loads(line)
+            if data.get("done", False):
+                eval_count = data.get("eval_count", 0)
+                eval_duration_ns = data.get("eval_duration", 0)
+                prompt_eval_duration_ns = data.get("prompt_eval_duration", 0)
+                total_duration_ns = data.get("total_duration", 0)
+            else:
+                content = data.get("message", {}).get("content", "")
+                if content and first_token_time is None:
+                    first_token_time = time.perf_counter()
+                response_chunks.append(content)
+
+        turn_response = "".join(response_chunks)
+        final_response = turn_response
+
+        if first_ttft_ms is None:
+            ttft_ms = (first_token_time - start_time) * 1000 if first_token_time else (time.perf_counter() - start_time) * 1000
+            first_ttft_ms = ttft_ms
+
+        total_eval_count += eval_count
+        total_eval_duration_ns += eval_duration_ns
+        total_prompt_eval_duration_ns += prompt_eval_duration_ns
+        total_duration_ns_sum += total_duration_ns
+
+        messages.append({"role": "assistant", "content": turn_response})
+
+    if not final_response and total_eval_count == 0:
+        raise RuntimeError(
+            f"Chat inference returned empty response for model '{model}'."
+        )
+
+    tokens_per_sec = total_eval_count / (total_eval_duration_ns / 1e9) if total_eval_duration_ns > 0 else 0.0
+
+    return InferenceResult(
+        response_text=final_response,
+        tokens_per_sec=tokens_per_sec,
+        ttft_ms=first_ttft_ms or 0.0,
+        eval_count=total_eval_count,
+        eval_duration_ns=total_eval_duration_ns,
+        prompt_eval_duration_ns=total_prompt_eval_duration_ns,
+        total_duration_ns=total_duration_ns_sum,
+    )
+
+
 def wait_for_api(base_url: str, timeout: int = 60) -> bool:
     """Poll Ollama API until it's ready or timeout."""
     deadline = time.time() + timeout

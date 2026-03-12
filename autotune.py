@@ -26,12 +26,13 @@ from eval_harness import (
     unload_model,
     ollama_url,
     pull_model,
+    run_chat_inference,
     run_inference,
     run_tool_inference,
     wait_for_api,
     warmup,
 )
-from judge import judge_output, judge_tool_call
+from judge import judge_chat, judge_output, judge_tool_call
 from preflight import preflight_check
 
 
@@ -265,6 +266,17 @@ def compute_quality(
         judge_weight = weights.get("judge_weight", 0.50)
         quality = (objective_score or 1.0) * obj_weight * 10 + judge_score * judge_weight
 
+    elif prompt_type == "chat":
+        sub_weights = {
+            "instruction_following": weights.get("chat_instruction_following", 0.25),
+            "content_quality":       weights.get("chat_content_quality", 0.30),
+            "professionalism":       weights.get("chat_professionalism", 0.20),
+            "conciseness":           weights.get("chat_conciseness", 0.15),
+            "context_retention":     weights.get("chat_context_retention", 0.10),
+        }
+        judge_score = sum(judge_scores.get(k, 5.0) * w for k, w in sub_weights.items())
+        quality = judge_score  # chat quality is pure semantic judge
+
     else:
         judge_score = 5.0
         quality = 5.0
@@ -372,6 +384,21 @@ def evaluate_params(
                 total_time = result.total_duration_ns / 1_000_000
                 used_native = result.used_native_tools
 
+            elif prompt_type == "chat":
+                result = run_chat_inference(
+                    model=model,
+                    system_prompt=prompt_entry.get("system_prompt"),
+                    turns=[t["content"] for t in prompt_entry["turns"]],
+                    options=params,
+                    base_url=base_url,
+                )
+                response_text = result.response_text
+                tool_calls = []
+                tps = result.tokens_per_sec
+                ttft = result.ttft_ms
+                total_time = result.total_duration_ns / 1_000_000
+                used_native = False
+
             else:
                 print(f"    Skipping unknown prompt type '{prompt_type}' for {prompt_id}")
                 continue
@@ -404,6 +431,24 @@ def evaluate_params(
                 prompt=prompt_entry["prompt"],
                 candidate=response_text,
                 reference=reference or "",
+                model=judge_model,
+            )
+        elif prompt_type == "chat":
+            # Build conversation history up to (but not including) the final response
+            conversation = []
+            if prompt_entry.get("system_prompt"):
+                conversation.append({"role": "system", "content": prompt_entry["system_prompt"]})
+            turns = prompt_entry.get("turns", [])
+            for i, turn in enumerate(turns[:-1]):
+                conversation.append({"role": "user", "content": turn["content"]})
+                # We don't have intermediate responses stored, so the judge sees the turns only
+                # (for single-turn prompts this is just the one user message)
+            conversation.append({"role": "user", "content": turns[-1]["content"]})
+            scores = judge_chat(
+                prompt_entry=prompt_entry,
+                conversation=conversation,
+                response_text=response_text,
+                reference=reference,
                 model=judge_model,
             )
         else:  # tool_call
@@ -455,6 +500,12 @@ def evaluate_params(
                   f"(c={scores.get('correctness',0):.0f} co={scores.get('completeness',0):.0f} "
                   f"cl={scores.get('clarity',0):.0f} a={scores.get('agent_utility',0):.0f}) "
                   f"tps={tps:.1f} ttft={ttft:.0f}ms")
+        elif prompt_type == "chat":
+            n_turns = len(prompt_entry.get("turns", []))
+            print(f"    {prompt_id}: quality={quality:.2f} "
+                  f"(if={scores.get('instruction_following',0):.0f} cq={scores.get('content_quality',0):.0f} "
+                  f"pr={scores.get('professionalism',0):.0f} cn={scores.get('conciseness',0):.0f} "
+                  f"cr={scores.get('context_retention',0):.0f}) turns={n_turns} tps={tps:.1f} ttft={ttft:.0f}ms")
         else:
             called = tool_calls[0]["function"]["name"] if tool_calls else "none"
             native = "native" if used_native else "text"

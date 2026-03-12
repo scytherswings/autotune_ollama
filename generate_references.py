@@ -61,6 +61,36 @@ def _to_anthropic_tools(ollama_tools: list) -> list:
     return result
 
 
+def _generate_chat_reference(
+    client: anthropic.Anthropic,
+    prompt_entry: dict,
+    model: str,
+) -> str:
+    """Run the full multi-turn conversation with Opus and return the final response."""
+    messages = []
+    for turn in prompt_entry["turns"]:
+        messages.append({"role": "user", "content": turn["content"]})
+        if turn is not prompt_entry["turns"][-1]:
+            # Get intermediate responses to build proper multi-turn history
+            resp = client.messages.create(
+                model=model,
+                max_tokens=2048,
+                system=prompt_entry.get("system_prompt", ""),
+                messages=messages,
+            )
+            assistant_text = resp.content[0].text
+            messages.append({"role": "assistant", "content": assistant_text})
+
+    # Final turn
+    resp = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=prompt_entry.get("system_prompt", ""),
+        messages=messages,
+    )
+    return resp.content[0].text
+
+
 def _generate_tool_call_reference(
     client: anthropic.Anthropic,
     prompt_entry: dict,
@@ -136,6 +166,9 @@ def generate_references(
         tools = tool_sets.get(ts_key, []) if ts_key else []
         # Capture tools in closure
         work.append((entry, lambda e, t=tools: _generate_tool_call_reference(client, e, t, model)))
+
+    for entry in data.get("chat_prompts", []):
+        work.append((entry, lambda e: _generate_chat_reference(client, e, model)))
 
     total = len(work)
     generated = 0
