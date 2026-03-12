@@ -348,111 +348,111 @@
   ],
   "chat_prompts": [
     {
-      "id": "meeting-agenda",
+      "id": "chat-meeting-agenda",
       "category": "chat",
       "subcategory": "single_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "I have a 60-minute product roadmap review next Thursday with 5 people: myself (CEO), our Head of Product (Sara), Lead Engineer (Tom), VP Sales (David), and a new external advisor (Rachel Kim, ex-Stripe, joining for the first time). The goal is to align on Q3 priorities and make a go/no-go decision on whether to delay a major infrastructure migration that's been on the roadmap for 6 months. Create a meeting agenda."
+          "content": "I need an agenda for a 60-minute staff meeting next Monday. Attendees: me (owner), our two lead therapists (Dana and Rob), our front desk manager (Lisa), and a new practitioner (Keiko, starts this week — her first staff meeting). Main goals: review March booking numbers, decide whether to move forward with adding float therapy as a new service, and make sure Keiko understands how we handle client preferences and rebooking. Create a meeting agenda with time allocations."
         }
       ],
-      "notes": "Baseline single-turn. Tests structured document generation from a clear brief. Good response will include time allocations, named agenda items, and address the decision that needs to be made."
+      "notes": "Baseline single-turn. Tests structured agenda generation from a realistic wellness center brief. Good response allocates time sensibly, names agenda items clearly, and doesn't ignore Keiko's onboarding need alongside the float therapy decision."
     },
     {
-      "id": "action-items",
+      "id": "chat-action-items",
       "category": "chat",
       "subcategory": "single_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Extract all action items from this meeting transcript. For each item include: owner, what they need to do, and deadline if mentioned.\n\n---\nJamie: OK so let's wrap up. Marcus, you said you'd get the pricing deck updated before the board meeting?\nMarcus: Yeah I'll have that done by end of Wednesday.\nJamie: Great. And Priya, the onboarding checklist — where are we on that?\nPriya: I need another week. I'll send the draft to the team by Friday the 14th for review.\nJamie: That works. Tom, you were going to set up the staging environment for the new integration, right?\nTom: Yep, I'll have it ready for QA by next Monday morning.\nJamie: Perfect. I'll send the board prep materials out by tomorrow EOD, and I'll also schedule the pre-board alignment call — I'm thinking Tuesday at 2pm, I'll send a calendar invite. Sarah, can you pull the churn numbers for Q1 vs Q2? We'll need those for the board deck.\nSarah: Sure, I can have those to you by tomorrow afternoon.\nJamie: Great. Let's make sure we actually do a retrospective after the board meeting this time — I'll put something on the calendar for the Thursday after.\n---"
+          "content": "Extract all action items from this staff meeting transcript. For each item include: owner, what they need to do, and deadline if mentioned.\n\n---\nOwner: OK, let's wrap up. Lisa, you were going to update the cancellation policy in the booking system?\nLisa: Yes, I'll have that done by end of day Thursday.\nOwner: Great. And Dana — the intake forms for the new deep tissue clients, you said you'd revise those?\nDana: I'll send a draft to the team by Friday for feedback. Want it finalized the following Monday?\nOwner: Yes, Monday the 17th works. Rob, can you put together a list of the equipment we'd need if we add float therapy? Just a rough cost estimate for now.\nRob: Sure, I'll pull that together by next Wednesday.\nOwner: Perfect. I'll reach out to the float tank supplier we met at the trade show — I'll send them an email today asking for a site visit. Lisa, one more thing — can you pull the no-show rate by service type for Q1? I need that before we talk to our accountant on the 20th.\nLisa: I'll have it to you by the 19th.\nOwner: Good. Let's plan to revisit the float therapy decision at the next meeting once Rob and I have the numbers.\n---"
         }
       ],
-      "notes": "Extraction task from realistic transcript. Tests whether model captures all owners and deadlines accurately without hallucinating items or missing any."
+      "notes": "Extraction from a realistic wellness center staff meeting. Tests accurate capture of all 5 action items with correct owners and deadlines. No hallucinated items, no missed items."
     },
     {
-      "id": "status-email",
+      "id": "chat-client-email",
       "category": "chat",
       "subcategory": "single_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Draft a professional weekly status update email to send to our investor group (4 investors, all familiar with our business). Keep it under 200 words. Here are the key points from this week:\n\n- Closed two new enterprise deals: Northgate Legal ($48K ARR) and Bloom Consulting ($31K ARR)\n- Lost one renewal: Apex Group churned, $22K ARR, cited poor onboarding experience\n- New ARR this week: net +$57K, total now $3.18M\n- Priya's onboarding redesign is live for all new customers starting this week\n- Engineering shipped the client dashboard feature (was 2 weeks late but quality looks good)\n- Pipeline: 3 deals in final stage, combined $140K ARR, expected close within 30 days"
+          "content": "Draft a short email to send to our active client list announcing that we're adding a new 30-minute \"Express Recovery\" massage service starting April 1st. Price is $55. It's designed for people with tight schedules — no intake paperwork for returning clients, straight to the table. Key points to hit:\n- New service name and price\n- Who it's for (busy schedules, lunch breaks, quick recovery between workouts)\n- That returning clients can book it right now, new clients need a 5-minute intake first\n- A call to action to book online or call the front desk\n\nKeep it under 150 words. Warm but professional tone — this is going to people who already know us."
         }
       ],
-      "notes": "Email drafting from bullet points. Tests professional tone, appropriate brevity, and correct math ($48K + $31K - $22K = $57K net). Good response will not editorialize or add fluff."
+      "notes": "Client-facing email drafting. Tests tone calibration (warm, not corporate), brevity, and whether all 4 required points make it in under the word limit. Good response won't add filler or invent details not in the brief."
     },
     {
-      "id": "exec-summary",
+      "id": "chat-business-summary",
       "category": "chat",
       "subcategory": "single_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Turn these raw project notes into a polished executive summary (max 150 words) for inclusion in a board deck. The audience is non-technical board members.\n\nRaw notes:\n- project: migrate from legacy monolith to microservices\n- started Q4 last year, originally planned 6 months\n- now at month 9, still not done\n- root cause of delay: underestimated data migration complexity, had to rebuild 3 services from scratch after discovering schema inconsistencies\n- current status: 7 of 11 services migrated, remaining 4 are lower risk\n- what's working: team velocity has improved significantly in migrated services, deployment time down from 4 hours to 18 minutes\n- risks: 2 engineers on the migration are being pulled for a customer escalation next month\n- projected completion: end of Q3 with current resourcing, end of Q2 if we backfill the 2 engineers\n- ask: approval to hire 2 contract engineers at ~$15K/month each for 3 months"
+          "content": "I'm meeting with a local bank next week to discuss a small business loan for a second location. Turn these raw notes into a polished one-page business summary (max 200 words) I can leave with them. The audience is a bank loan officer — they care about financial stability, growth trajectory, and risk.\n\nRaw notes:\n- opened 2021, profitable since month 14\n- current location: 6 treatment rooms, 8 practitioners (3 full-time, 5 part-time)\n- 2025 revenue: $680K, up 22% from 2024\n- avg monthly bookings: 1,100, running at 84% capacity for the past 6 months\n- no-show rate: 8% (industry avg is ~15%)\n- client retention: 71% of clients rebook within 60 days\n- asking for: $180K loan to fit out a second location, 12-month timeline to open\n- second location identified: retail space in Riverside district, 8 rooms, lease terms favorable\n- risk: depends on hiring 4 new practitioners before opening; local talent market is competitive"
         }
       ],
-      "notes": "Synthesis task. Tests ability to distill messy notes into clean prose without losing key facts (delay, root cause, ask). Must not use technical jargon for board audience."
+      "notes": "Synthesis for a specific audience. Tests ability to frame raw operational data as a financial narrative for a bank. Good response leads with strength (profitability, growth, capacity utilization) and addresses risk honestly without burying it."
     },
     {
-      "id": "agenda-refine",
+      "id": "chat-agenda-refine",
       "category": "chat",
       "subcategory": "two_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Create a 90-minute quarterly business review agenda for our leadership team of 8 (CEO, CFO, CTO, VP Sales, VP Marketing, Head of Product, Head of Customer Success, Head of Engineering). Focus on Q2 results and Q3 planning."
+          "content": "Create a 75-minute quarterly planning agenda for next Friday. Attendees: me (owner), Dana and Rob (lead therapists), Lisa (front desk manager), and our bookkeeper Marcus. Topics to cover: Q1 financials, summer staffing plan, the float therapy decision, and client retention numbers."
         },
         {
           "role": "user",
-          "content": "The CFO just cancelled — she'll send a written financial summary instead. Cut the financial review segment to 5 minutes max (just time to review her written update). Use the freed-up time to add a 20-minute discussion on a new enterprise market opportunity we've been seeing in the financial services sector. Keep the total at 90 minutes."
+          "content": "Marcus just told me he can only stay for the first 45 minutes — he has another client. Restructure the agenda so everything he needs to be present for (the financials and anything involving budget decisions) happens in the first 45 minutes. The float therapy discussion and staffing plan can happen after he leaves. Keep the total at 75 minutes."
         }
       ],
-      "notes": "2-turn refinement. Turn 2 tests whether the model actually restructures the agenda (removes CFO-led time, trims finance, adds the new item) rather than just appending. Total time must still sum to 90 minutes."
+      "notes": "2-turn restructure. Turn 2 tests whether the model genuinely reorders the agenda (financials and budget items first, float therapy and staffing after) rather than just appending a note. Total must still be 75 minutes."
     },
     {
-      "id": "audience-rewrite",
+      "id": "chat-policy-rewrite",
       "category": "chat",
       "subcategory": "two_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Write a one-page summary of why we're migrating our backend from a monolithic Django application to a FastAPI microservices architecture. This version is for our engineering team — assume they know what these technologies are."
+          "content": "Write a clear internal policy document for our staff on how to handle late cancellations and no-shows. Our policy: clients must cancel at least 24 hours in advance. Late cancellations (under 24 hours) are charged 50% of the service fee. No-shows are charged 100%. First-time clients and medical emergencies are exceptions — use judgment. Staff should log every exception in the booking system with a reason."
         },
         {
           "role": "user",
-          "content": "Now rewrite that summary for our enterprise customers. They are non-technical executives who care about reliability, security, and ROI — not implementation details. No acronyms, no tech stack names. Focus on what this means for them: uptime, performance, and our ability to respond faster to their feature requests."
+          "content": "Good. Now rewrite that as a short client-facing version for our website FAQ. Same policy, but the tone should be warm and reassuring — we want clients to feel respected, not threatened. No staff instructions, no mention of logging. Keep it under 100 words."
         }
       ],
-      "notes": "2-turn audience shift. Turn 2 tests whether the model genuinely rewrites for a different audience (no tech terms, benefits framing) rather than lightly editing the Turn 1 response."
+      "notes": "2-turn audience shift from internal staff policy to client-facing FAQ. Turn 2 tests genuine rewriting: removes staff-specific instructions, shifts tone from procedural to reassuring, hits the word limit. A weak response just lightly edits the Turn 1 text."
     },
     {
-      "id": "q3-planning-stress",
+      "id": "chat-expansion-stress",
       "category": "chat",
       "subcategory": "three_turn",
-      "system_prompt": "You are a strategic business advisor helping with planning, communication, and document preparation. Be direct, concise, and professional. Format output clearly.",
+      "system_prompt": "You are a business advisor helping the owner of Serenity Wellness Center — a mid-size day spa and massage therapy studio — with planning, communications, and business decisions. Be direct, concise, and professional.",
       "turns": [
         {
           "role": "user",
-          "content": "Here's our situation at Meridian Analytics — please review this before we start planning.\n\nMeridian Analytics is a B2B SaaS platform that helps mid-market professional services firms (law firms, accounting firms, consultancies) track client engagement and project profitability. Founded in 2019 by Clara Webb (CEO, ex-McKinsey) and James Park (CTO, ex-Palantir). Bootstrapped to $1.8M ARR before raising a $4M seed round in 2023 from Foundry Capital.\n\nCurrent state: 51 employees, $3.1M ARR, 74 active customers. Average contract value is $42K/year. Main competition is Salesforce (too complex for our buyers) and spreadsheets (too manual). Our ICP is professional services firms with 20–200 employees.\n\nQ1 results (Jan–Mar 2026): Missed our $3.4M ARR target by 18%. Churn spiked to 9.4% — our worst quarter on record. Six customers churned, all within their first 90 days. Net new logo growth was 3 against a target of 8.\n\nRoot cause (confirmed via exit interviews with all 6 churned customers): Onboarding was taking 11+ weeks on average. Customers sign, then go dark during implementation, lose organizational momentum, and by go-live the internal champion has either moved on or lost executive support. The product itself has strong NPS of 52 once customers are fully onboarded — the problem is getting them there.\n\nQ2 response (Apr–Jun 2026, in progress): We hired two implementation specialists — Priya Sharma (from ServiceNow) and Ben Torres (from Salesforce). We rebuilt the onboarding playbook targeting 4-week go-live. We also shipped an automated implementation progress dashboard so customers can track status without waiting on weekly calls from us. Early signal: the 7 customers onboarded under the new playbook have averaged 4.8 weeks to go-live. No churn from this cohort so far.\n\nQ3 goals (Jul–Sep 2026): Reduce churn to below 4%. Grow ARR from $3.1M to $4.0M — requires 12 net new logos plus expansion from existing customers. Close our Series A ($8M target; active conversations with Emergence Capital, Bessemer, and one undisclosed firm). Key constraint: CFO Yuki Tanaka has frozen all headcount additions until we either hit $3.5M ARR or close the Series A.\n\nKey attendees for our Q3 planning session next Tuesday:\n- Clara Webb, CEO — sets strategy, owns investor relationships\n- James Park, CTO — owns product roadmap and technical implementation\n- Priya Sharma, Head of Implementation — owns the new onboarding playbook\n- Marcus Chen, VP Sales — joined April 2026, came from Databricks, still ramping on our ICP and sales motion\n- Yuki Tanaka, CFO — controls budget, skeptical of headcount asks, wants to see churn improvement data before approving anything\n\nPlease create a 90-minute Q3 planning agenda for next Tuesday (July 7, 2026). The primary goal is to assess whether we have enough Q2 signal to confidently project hitting Q3 targets, and to decide how to resource the sales push given Yuki's headcount freeze."
+          "content": "Here's where we are as a business — I want you to have the full picture before we start planning.\n\nSerenity Wellness Center opened in March 2021 in the Eastside neighborhood. We have 6 treatment rooms, 8 practitioners (Dana Wells and Rob Kim are our two senior full-time therapists; the other 6 are part-time), and Lisa Park runs our front desk. I own and manage the business.\n\nRevenue: $680K in 2025, up 22% from 2024 ($557K). We've been profitable since month 14. March 2026 is our best month ever — on track for $72K.\n\nBookings: averaging 1,100 per month for the past 6 months. We're running at 84% capacity. Our no-show rate is 8% (we implemented a deposit requirement in September 2025, down from 19% before that). 71% of clients rebook within 60 days.\n\nServices: Swedish massage, deep tissue, hot stone, prenatal massage, sports massage, and facial treatments. Average ticket is $95.\n\nQ1 2026 challenge: Rob Kim informed us in January that he's leaving in June to open his own practice. He's our highest-rated practitioner (4.9 stars, 340 reviews) and manages roughly 30% of our monthly bookings. We've started recruiting but the local therapist market is tight — we've interviewed 6 candidates and made 2 offers; both declined citing our compensation structure. We currently pay practitioners 42% commission.\n\nFloat therapy opportunity: We've been approached by a float tank supplier (Zen Float Co.) about becoming their first wellness center partner in the city. Float therapy (sensory deprivation tanks) commands $75–$95 per session, has very low per-session labor cost once installed, and has strong repeat usage. Installing 2 tanks would require converting 2 treatment rooms and approximately $95K in capital investment. Payback period estimated at 18–24 months at projected utilization.\n\nStaffing plan: To replace Rob and handle float therapy intake (float sessions need a brief orientation), we'd need to hire 2 full-time practitioners. We're considering raising commission to 47% to be more competitive — this reduces our margin per session from 58% to 53% but would put us above market rate.\n\nKey decision for Q2 planning: Do we proceed with float therapy now (while we have capital and momentum) or wait until Rob's replacement is stable? Our accountant Marcus Chen advises waiting; Dana Wells thinks the float opportunity is time-sensitive and we should move.\n\nPlease create a focused 60-minute planning agenda for a decision meeting next week. Attendees: me, Dana, Lisa, and Marcus (our bookkeeper/accountant). Rob will not be attending — we haven't announced his departure to the full team yet."
         },
         {
           "role": "user",
-          "content": "Good. For each agenda item, add 2–3 specific discussion questions that will actually drive the conversation forward. Mark each item clearly as either DECISION (a clear choice needs to be made in the room) or UPDATE (informational, no decision required)."
+          "content": "Good. For each agenda item, add 2–3 specific discussion questions that will move us toward a decision. Mark each item as DECISION (needs a clear outcome from this meeting) or UPDATE (informational only)."
         },
         {
           "role": "user",
-          "content": "One more thing. Marcus is joining his first full planning session — he came from Databricks in April and hasn't been through a Meridian planning cycle before. Write him a 150-word pre-read that gives him the context he needs: what happened in Q1, why it happened, and what we've done about it in Q2. Be specific — use the actual numbers. Don't assume he knows any of this history."
+          "content": "One more thing — I need to write a short brief for Dana before the meeting. She's passionate about float therapy and will advocate hard for it, but she doesn't have the full financial picture. Write her a 150-word pre-read that gives her the context she needs to have a productive conversation: specifically, what the float therapy investment involves, what our staffing situation looks like right now, and why Marcus is advising us to wait. Use the actual numbers. Don't sugarcoat the staffing risk."
         }
       ],
-      "notes": "3-turn context stress test. Turn 3 explicitly asks for specific details from Turn 1 (18% miss, 9.4% churn, 11-week onboarding, exit interview findings, Priya and Ben hired, 4.8-week average under new playbook). Models with truncated context will produce vague or incorrect pre-reads missing the key numbers."
+      "notes": "3-turn context stress test grounded in the wellness center. Turn 1 is ~650 tokens of business detail. Turn 3 asks for specific numbers and facts from Turn 1: $95K investment, 18–24 month payback, Rob's departure timeline, 2 declined offers at 42% commission, Marcus's advisory position. Models with truncated context will produce vague pre-reads missing the financial specifics and staffing reality."
     }
   ]
 }
